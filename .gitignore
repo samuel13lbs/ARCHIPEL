@@ -1,0 +1,24 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual envs
+.venv/
+venv/
+
+# Local node/runtime state
+.archipel/
+.archipel-test/
+.archipel-test-s3/
+.archipel-test-s4/
+
+# Secrets/keys
+*.key
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
