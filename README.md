@@ -60,6 +60,7 @@ python -m pip install --user cryptography
 ```powershell
 $env:PYTHONPATH="src"
 python -m cli.archipel start --port 7777
+# mode offline strict (sans IA): python -m cli.archipel start --port 7777 --no-ai
 ```
 
 ## Lancement Web UI (offline)
@@ -67,6 +68,7 @@ python -m cli.archipel start --port 7777
 ```powershell
 $env:PYTHONPATH="src"
 python -m web.server --node-port 7777 --web-port 8080
+# mode offline strict (sans IA): python -m web.server --node-port 7777 --web-port 8080 --no-ai
 ```
 
 Ouvrir ensuite `http://127.0.0.1:8080`.
@@ -75,12 +77,16 @@ Ouvrir ensuite `http://127.0.0.1:8080`.
 
 - `help`
 - `whoami`
+- `ai-status`
+- `chat-history`
+- `ask <question>` (alias: `/ask <question>`)
 - `add-peer <node_id> <ip> <port> [ed25519_pub_b64]`
 - `peers`
 - `trusted`
 - `trust <node_id|prefix>`
 - `untrust <node_id|prefix>`
 - `msg <node_id|prefix> <texte>`
+- `msg @archipel-ai <question>`
 - `send <node_id|prefix> <filepath>`
 - `receive` (alias de `files`)
 - `files`
@@ -107,6 +113,8 @@ Scripts de démo:
 
 Voir `.env.example` pour les valeurs usuelles (ports, state dir).
 `ARCHIPEL_CONTROL_HMAC_KEY` (hex 32 bytes) permet de protéger les paquets de contrôle pré-session.
+`GEMINI_API_KEY` active l'assistant IA (sinon fallback gracieux).
+`GEMINI_MODEL` permet de changer de modèle (défaut: `gemini-2.5-flash`).
 
 ## Limites connues
 
@@ -114,7 +122,7 @@ Voir `.env.example` pour les valeurs usuelles (ports, state dir).
 - Keepalive actif implémenté sur sessions sécurisées; instrumentation avancée encore à faire.
 - Authentification pré-session des paquets de contrôle (HMAC statique locale) à durcir.
 - TOFU automatique non activé (validation via trust manuel uniquement).
-- Intégration Gemini non implémentée.
+- L'IA Gemini dépend d'une connectivité externe + clé API valide.
 
 ## Pistes d'amélioration
 

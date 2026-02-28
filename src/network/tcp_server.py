@@ -30,6 +30,7 @@ class TcpServer:
         transfer: TransferManager,
         logger: Callable[[str], None],
         is_trusted: Optional[Callable[[str], bool]] = None,
+        on_chat: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self.identity = identity
         self.listen_port = listen_port
@@ -37,6 +38,7 @@ class TcpServer:
         self.transfer = transfer
         self.log = logger
         self.is_trusted = is_trusted if is_trusted is not None else (lambda _node_id: True)
+        self.on_chat = on_chat if on_chat is not None else (lambda _node_id, _text: None)
         self._stop = threading.Event()
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -186,7 +188,12 @@ class TcpServer:
                     if not remote_trusted:
                         self.log(f"[TRUST] CHAT refusé depuis pair non approuvé {session.remote_node_id[:12]}...")
                         continue
-                    self.log(f"[MSG] {session.remote_node_id[:12]}... -> {payload.get('text', '')}")
+                    text = str(payload.get("text", ""))
+                    self.log(f"[MSG] {session.remote_node_id[:12]}... -> {text}")
+                    try:
+                        self.on_chat(session.remote_node_id, text)
+                    except Exception:
+                        pass
                     ack = {"kind": "ACK", "ts": int(time.time() * 1000)}
                     send_secure_payload(stream, session, self.identity.node_id, ack)
                     continue

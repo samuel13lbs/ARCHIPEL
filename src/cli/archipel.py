@@ -10,8 +10,14 @@ def log(msg: str) -> None:
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
-def run_start(port: int, hello_interval: int, state_dir: str) -> None:
-    runtime = ArchipelRuntime(port=port, hello_interval=hello_interval, state_dir=state_dir, logger=log)
+def run_start(port: int, hello_interval: int, state_dir: str, no_ai: bool) -> None:
+    runtime = ArchipelRuntime(
+        port=port,
+        hello_interval=hello_interval,
+        state_dir=state_dir,
+        logger=log,
+        ai_enabled=not no_ai,
+    )
     runtime.start()
 
     stopping = False
@@ -28,8 +34,9 @@ def run_start(port: int, hello_interval: int, state_dir: str) -> None:
         signal.signal(signal.SIGTERM, shutdown)
 
     log(
-        "[CLI] Commandes: help | whoami | add-peer <node_id> <ip> <port> [ed25519_pub_b64] | peers | trusted | "
-        "trust <node> | untrust <node> | files | status | msg | send | download | quit"
+        "[CLI] Commandes: help | whoami | ai-status | chat-history | ask | add-peer <node_id> <ip> <port> "
+        "[ed25519_pub_b64] | peers | trusted | trust <node> | untrust <node> | files | status | msg | send | "
+        "download | quit"
     )
     while not stopping:
         try:
@@ -60,11 +67,12 @@ def main() -> int:
     p_start.add_argument("--port", type=int, default=7777)
     p_start.add_argument("--hello-interval", type=int, default=30)
     p_start.add_argument("--state-dir", type=str, default=".archipel")
+    p_start.add_argument("--no-ai", action="store_true", help="Désactiver l'intégration Gemini")
 
     args = parser.parse_args()
 
     if args.cmd == "start":
-        run_start(port=args.port, hello_interval=args.hello_interval, state_dir=args.state_dir)
+        run_start(port=args.port, hello_interval=args.hello_interval, state_dir=args.state_dir, no_ai=args.no_ai)
         return 0
 
     return 1

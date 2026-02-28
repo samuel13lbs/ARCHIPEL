@@ -5,10 +5,12 @@ import random
 import shlex
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
 from crypto.identity import b64d, load_or_create_identity, node_id_matches_pubkey
+from messaging.gemini_client import GeminiClient
 from network.discovery import DiscoveryService
 from network.peer_table import Peer
 from network.peer_table import PeerTable
@@ -26,11 +28,16 @@ class ArchipelRuntime:
         hello_interval: int,
         state_dir: str,
         logger: Callable[[str], None],
+        ai_enabled: bool = True,
+        ai_context_messages: int = 12,
     ) -> None:
         self.port = port
         self.hello_interval = hello_interval
         self.state_dir = state_dir
         self.log = logger
+        self._chat_history: deque[dict] = deque(maxlen=200)
+        self.ai_context_messages = max(1, ai_context_messages)
+        self.ai = GeminiClient.from_env(enabled=ai_enabled, logger=self.log)
 
         self.profile = f"node-{port}"
         self.identity = load_or_create_identity(state_dir, profile=self.profile)
@@ -46,6 +53,7 @@ class ArchipelRuntime:
             transfer=self.transfer,
             logger=self.log,
             is_trusted=self.trust.is_trusted,
+            on_chat=self._on_chat_received,
         )
         self.discovery = DiscoveryService(
             node_id=self.identity.node_id,
@@ -59,6 +67,10 @@ class ArchipelRuntime:
     def start(self) -> None:
         self.log(f"[NODE] node_id={self.identity.node_id}")
         self.log(f"[NODE] pubkey_b64={self.identity.public_key_b64}")
+        ai_state = self.ai.status()
+        self.log(
+            f"[AI] enabled={ai_state['enabled']} configured={ai_state['configured']} model={ai_state['model']}"
+        )
         self.tcp.start()
         self.discovery.start()
 
@@ -83,6 +95,51 @@ class ArchipelRuntime:
         for p in peers:
             p["trusted"] = self.trust.is_trusted(str(p.get("node_id", "")))
         return peers
+
+    def ai_status_payload(self) -> dict:
+        return self.ai.status()
+
+    def chat_history_payload(self, limit: int = 30) -> list[dict]:
+        if limit <= 0:
+            return []
+        return list(self._chat_history)[-limit:]
+
+    def _record_chat(self, role: str, text: str, peer_node_id: str = "") -> None:
+        text = text.strip()
+        if not text:
+            return
+        self._chat_history.append(
+            {
+                "ts": int(time.time() * 1000),
+                "role": role,
+                "peer": peer_node_id,
+                "text": text,
+            }
+        )
+
+    def _on_chat_received(self, from_node_id: str, text: str) -> None:
+        self._record_chat("peer", text, peer_node_id=from_node_id)
+
+    def _ai_context_lines(self) -> list[str]:
+        out: list[str] = []
+        for item in self.chat_history_payload(limit=self.ai_context_messages):
+            role = str(item.get("role", "user"))
+            peer = str(item.get("peer", ""))
+            label = role if not peer else f"{role}:{peer[:12]}"
+            out.append(f"{label} > {item.get('text', '')}")
+        return out
+
+    def _run_ai_query(self, question: str) -> str:
+        question = question.strip()
+        if not question:
+            return "[AI] Usage: ask <question>"
+        self._record_chat("user", question)
+        try:
+            answer = self.ai.ask(self._ai_context_lines(), question)
+        except Exception as exc:
+            return f"[AI] {exc}"
+        self._record_chat("assistant", answer)
+        return f"[AI] {answer}"
 
     def _candidate_download_peers(self, selector: str, file_id: str) -> list[Peer]:
         if selector:
@@ -223,8 +280,9 @@ class ArchipelRuntime:
 
         if cmd == "help":
             return (
-                "whoami | add-peer <node_id> <ip> <port> [ed25519_pub_b64] | peers | trusted | trust <node> | "
-                "untrust <node> | files/receive | status | msg <node> <texte> | send <node> <filepath> | "
+                "whoami | ai-status | chat-history | ask </question> | add-peer <node_id> <ip> <port> "
+                "[ed25519_pub_b64] | peers | trusted | trust <node> | untrust <node> | files/receive | status | "
+                "msg <node> <texte> | msg @archipel-ai <question> | send <node> <filepath> | "
                 "download <file_id> [node] [output] | quit"
             )
 
@@ -262,6 +320,16 @@ class ArchipelRuntime:
             self.table.upsert(node_id=node_id, ip=ip, tcp_port=tcp_port, ed25519_pub=ed25519_pub)
             return f"[PEER] Pair ajoute: {node_id[:12]}... {ip}:{tcp_port}"
 
+        if cmd == "ai-status":
+            return json.dumps(self.ai_status_payload(), indent=2)
+
+        if cmd == "chat-history":
+            return json.dumps(self.chat_history_payload(limit=30), indent=2)
+
+        if cmd in {"ask", "/ask"}:
+            question = " ".join(tokens[1:]) if len(tokens) > 1 else ""
+            return self._run_ai_query(question)
+
         if cmd == "peers":
             return json.dumps(self.peers_payload(), indent=2)
 
@@ -296,12 +364,19 @@ class ArchipelRuntime:
         if cmd == "msg":
             if len(tokens) < 3:
                 return "[CLI] Usage: msg <node_id/prefix> <texte>"
+            if tokens[1].lower() in {"@archipel-ai", "archipel-ai"}:
+                question = " ".join(tokens[2:])
+                return self._run_ai_query(question)
+            text = " ".join(tokens[2:]).strip()
+            if text.lower().startswith("@archipel-ai"):
+                question = text[len("@archipel-ai") :].strip()
+                return self._run_ai_query(question)
             peer = self.table.resolve(tokens[1])
             if peer is None:
                 return "[CLI] Pair introuvable (exact ou préfixe unique requis)"
             self._ensure_trusted_or_raise(peer, "msg")
-            text = " ".join(tokens[2:])
             self.tcp.send_secure_message(peer, text)
+            self._record_chat("me", text, peer_node_id=peer.node_id)
             return ""
 
         if cmd == "send":
