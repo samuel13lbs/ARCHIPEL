@@ -137,7 +137,7 @@ class TcpServer:
                         msg = {"peers": json.loads(peers_raw.decode("utf-8"))}
                     except Exception:
                         continue
-                    self._handle_peer_list(ip, msg)
+                    self._handle_peer_list(ip, str(pkt.get("node_id", "")), msg)
                     continue
 
                 if ptype == PT_HS1:
@@ -263,7 +263,7 @@ class TcpServer:
             except Exception as exc:
                 self.log(f"[SECURE] Erreur payload: {exc}")
 
-    def _handle_peer_list(self, src_ip: str, msg: dict) -> None:
+    def _handle_peer_list(self, src_ip: str, sender_node_id: str, msg: dict) -> None:
         peers = msg.get("peers", [])
         if not isinstance(peers, list):
             return
@@ -272,7 +272,7 @@ class TcpServer:
         for p in peers:
             try:
                 node_id = str(p["node_id"])
-                ip = str(p.get("ip", src_ip))
+                ip = str(p.get("ip", src_ip)).strip()
                 tcp_port = int(p["tcp_port"])
                 ed25519_pub = str(p.get("ed25519_pub", ""))
                 shared_files = p.get("shared_files", [])
@@ -288,6 +288,12 @@ class TcpServer:
                         continue
                 except Exception:
                     continue
+
+            # If sender announces itself in PEER_LIST, the TCP source IP is authoritative.
+            if sender_node_id and node_id == sender_node_id:
+                ip = src_ip
+            elif not ip:
+                ip = src_ip
 
             self.peer_table.upsert(node_id=node_id, ip=ip, tcp_port=tcp_port, ed25519_pub=ed25519_pub)
             if isinstance(shared_files, list):

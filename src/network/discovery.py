@@ -32,6 +32,14 @@ def _guess_interface_ipv4s() -> list[str]:
     ips: set[str] = set()
 
     try:
+        _, _, host_ips = socket.gethostbyname_ex(socket.gethostname())
+        for ip in host_ips:
+            if ip and not ip.startswith("127."):
+                ips.add(ip)
+    except OSError:
+        pass
+
+    try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_DGRAM):
             ip = info[4][0]
             if ip and not ip.startswith("127."):
@@ -40,7 +48,7 @@ def _guess_interface_ipv4s() -> list[str]:
         pass
 
     # Force a route lookup to discover the default outbound local IP.
-    for target in (("8.8.8.8", 80), ("1.1.1.1", 80), ("10.255.255.255", 1)):
+    for target in (("239.255.42.99", 6000), ("8.8.8.8", 80), ("1.1.1.1", 80), ("10.255.255.255", 1)):
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             probe.connect(target)
@@ -212,7 +220,18 @@ class DiscoveryService:
             self._send_peer_list(ip, tcp_port)
 
     def _send_peer_list(self, dest_ip: str, dest_port: int) -> None:
-        peers_json = json.dumps(self.peer_table.to_list(), separators=(",", ":")).encode("utf-8")
+        peers = self.peer_table.to_list()
+        # Include self to make discovery robust even when HELLO reception is one-way.
+        peers.append(
+            {
+                "node_id": self.node_id,
+                "ip": "",
+                "tcp_port": self.tcp_port,
+                "ed25519_pub": self.ed25519_pub,
+                "shared_files": [],
+            }
+        )
+        peers_json = json.dumps(peers, separators=(",", ":")).encode("utf-8")
         payload = encode_tlvs([(TLV_PEER_LIST_JSON, peers_json)])
         data = pack_packet(PT_PEER_LIST, self.node_id, payload, CONTROL_HMAC_KEY)
         try:
