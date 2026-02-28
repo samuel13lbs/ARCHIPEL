@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import json
 import socket
 import struct
@@ -28,6 +28,33 @@ TLV_HELLO_TS = 0x03
 TLV_PEER_LIST_JSON = 0x01
 
 
+def _guess_interface_ipv4s() -> list[str]:
+    ips: set[str] = set()
+
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_DGRAM):
+            ip = info[4][0]
+            if ip and not ip.startswith("127."):
+                ips.add(ip)
+    except OSError:
+        pass
+
+    # Force a route lookup to discover the default outbound local IP.
+    for target in (("8.8.8.8", 80), ("1.1.1.1", 80), ("10.255.255.255", 1)):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(target)
+            ip = probe.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                ips.add(ip)
+        except OSError:
+            pass
+        finally:
+            probe.close()
+
+    return sorted(ips)
+
+
 class DiscoveryService:
     def __init__(
         self,
@@ -45,16 +72,38 @@ class DiscoveryService:
         self.log = logger
         self.hello_interval_seconds = hello_interval_seconds
         self._stop = threading.Event()
+        self._iface_ips = _guess_interface_ipv4s()
+        self._invalid_rx_count = 0
+
         self._send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self._send_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        self._send_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        self._send_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self._recv_sock = self._build_recv_socket()
 
     def _build_recv_socket(self) -> socket.socket:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("", MULTICAST_PORT))
-        mreq = socket.inet_aton(MULTICAST_GROUP) + socket.inet_aton("0.0.0.0")
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+        joined: list[str] = []
+        seen: set[str] = set()
+        for iface_ip in ["0.0.0.0", *self._iface_ips]:
+            if iface_ip in seen:
+                continue
+            seen.add(iface_ip)
+            try:
+                mreq = socket.inet_aton(MULTICAST_GROUP) + socket.inet_aton(iface_ip)
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                joined.append(iface_ip)
+            except OSError:
+                continue
+
+        if joined:
+            self.log(f"[DISCOVERY] Multicast join ok sur interfaces: {', '.join(joined)}")
+        else:
+            self.log("[DISCOVERY] Join multicast indisponible (fallback broadcast actif)")
+
         sock.settimeout(1.0)
         return sock
 
@@ -65,8 +114,14 @@ class DiscoveryService:
 
     def stop(self) -> None:
         self._stop.set()
-        self._recv_sock.close()
-        self._send_sock.close()
+        try:
+            self._recv_sock.close()
+        except OSError:
+            pass
+        try:
+            self._send_sock.close()
+        except OSError:
+            pass
 
     def _hello_packet(self) -> bytes:
         try:
@@ -85,11 +140,33 @@ class DiscoveryService:
 
     def _hello_loop(self) -> None:
         while not self._stop.is_set():
+            packet = self._hello_packet()
+            multicast_sent = 0
+
+            for iface_ip in self._iface_ips:
+                try:
+                    self._send_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(iface_ip))
+                    self._send_sock.sendto(packet, (MULTICAST_GROUP, MULTICAST_PORT))
+                    multicast_sent += 1
+                except OSError:
+                    continue
+
+            if multicast_sent == 0:
+                try:
+                    self._send_sock.sendto(packet, (MULTICAST_GROUP, MULTICAST_PORT))
+                    multicast_sent = 1
+                except OSError as exc:
+                    self.log(f"[DISCOVERY] Erreur envoi HELLO multicast: {exc}")
+
+            broadcast_ok = False
             try:
-                self._send_sock.sendto(self._hello_packet(), (MULTICAST_GROUP, MULTICAST_PORT))
-                self.log(f"[DISCOVERY] HELLO multicast envoyé ({MULTICAST_GROUP}:{MULTICAST_PORT})")
-            except OSError as exc:
-                self.log(f"[DISCOVERY] Erreur envoi HELLO: {exc}")
+                self._send_sock.sendto(packet, ("255.255.255.255", MULTICAST_PORT))
+                broadcast_ok = True
+            except OSError:
+                broadcast_ok = False
+
+            mode = "multicast+broadcast" if broadcast_ok else "multicast"
+            self.log(f"[DISCOVERY] HELLO envoye ({mode}, interfaces={multicast_sent})")
             self._stop.wait(self.hello_interval_seconds)
 
     def _recv_loop(self) -> None:
@@ -105,6 +182,9 @@ class DiscoveryService:
             try:
                 pkt = unpack_packet(raw, CONTROL_HMAC_KEY)
             except Exception:
+                self._invalid_rx_count += 1
+                if self._invalid_rx_count in {1, 5, 20}:
+                    self.log("[DISCOVERY] Paquets discovery invalides recus (verifier ARCHIPEL_CONTROL_HMAC_KEY)")
                 continue
 
             if pkt.get("type") != PT_HELLO:
@@ -128,7 +208,7 @@ class DiscoveryService:
 
             ed25519_pub_b64 = base64.b64encode(ed25519_pub_raw).decode("ascii")
             self.peer_table.upsert(node_id=node_id, ip=ip, tcp_port=tcp_port, ed25519_pub=ed25519_pub_b64)
-            self.log(f"[DISCOVERY] HELLO reçu de {node_id[:12]}... {ip}:{tcp_port}")
+            self.log(f"[DISCOVERY] HELLO recu de {node_id[:12]}... {ip}:{tcp_port}")
             self._send_peer_list(ip, tcp_port)
 
     def _send_peer_list(self, dest_ip: str, dest_port: int) -> None:
@@ -138,13 +218,13 @@ class DiscoveryService:
         try:
             with socket.create_connection((dest_ip, dest_port), timeout=2.0) as conn:
                 conn.sendall(data)
-            self.log(f"[DISCOVERY] PEER_LIST envoyée à {dest_ip}:{dest_port}")
+            self.log(f"[DISCOVERY] PEER_LIST envoyee a {dest_ip}:{dest_port}")
         except OSError as exc:
-            self.log(f"[DISCOVERY] PEER_LIST échec vers {dest_ip}:{dest_port} -> {exc}")
+            self.log(f"[DISCOVERY] PEER_LIST echec vers {dest_ip}:{dest_port} -> {exc}")
 
     def _cleanup_loop(self) -> None:
         while not self._stop.is_set():
             removed = self.peer_table.remove_stale()
             for node_id in removed:
-                self.log(f"[DISCOVERY] Pair expiré: {node_id[:12]}...")
+                self.log(f"[DISCOVERY] Pair expire: {node_id[:12]}...")
             self._stop.wait(5)
