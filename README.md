@@ -78,6 +78,12 @@ python -m web.server --node-port 7777 --web-port 8080
 
 Ouvrir ensuite `http://127.0.0.1:8080`.
 
+La Web UI inclut maintenant un mode messagerie:
+- liste des conversations,
+- ouverture d'un pair par `node_id` ou préfixe,
+- fil de discussion persistant par noeud (`.archipel/node-<port>/chat_history.jsonl`),
+- envoi direct sans taper les commandes CLI.
+
 ## Commandes disponibles (CLI/Web)
 
 - `help`
@@ -85,6 +91,8 @@ Ouvrir ensuite `http://127.0.0.1:8080`.
 - `ai-status`
 - `auto-status`
 - `chat-history`
+- `conversations`
+- `chat <node_id|prefix> [limit]`
 - `ask <question>` (alias: `/ask <question>`)
 - `add-peer <node_id> <ip> <port> [ed25519_pub_b64]`
 - `peers`

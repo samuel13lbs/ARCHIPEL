@@ -48,9 +48,9 @@ def run_start(
         signal.signal(signal.SIGTERM, shutdown)
 
     log(
-        "[CLI] Commandes: help | whoami | ai-status | auto-status | chat-history | ask | add-peer <node_id> <ip> <port> "
-        "[ed25519_pub_b64] | peers | trusted | trust <node> | untrust <node> | files | status | msg | send | "
-        "download | quit"
+        "[CLI] Commandes: help | whoami | ai-status | auto-status | chat-history | conversations | chat <node> | ask | "
+        "add-peer <node_id> <ip> <port> [ed25519_pub_b64] | peers | trusted | trust <node> | untrust <node> | "
+        "files | status | msg | send | download | quit"
     )
     while not stopping:
         try:
@@ -112,4 +112,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

@@ -43,7 +43,8 @@ class ArchipelRuntime:
         self.tofu_auto = tofu_auto
         self.auto_mode = auto_mode
         self.replication_factor = max(1, int(replication_factor))
-        self._chat_history: deque[dict] = deque(maxlen=200)
+        self._chat_history: deque[dict] = deque(maxlen=2000)
+        self._chat_lock = threading.Lock()
         self.ai_context_messages = max(1, ai_context_messages)
         self.ai = GeminiClient.from_env(enabled=ai_enabled, logger=self.log)
         self._bg_stop = threading.Event()
@@ -52,6 +53,9 @@ class ArchipelRuntime:
         self._auto_send_seen: set[str] = set()
 
         self.profile = f"node-{port}"
+        self._chat_path = Path(state_dir) / self.profile / "chat_history.jsonl"
+        self._chat_path.parent.mkdir(parents=True, exist_ok=True)
+        self._load_chat_history()
         default_auto_send_dir = Path(state_dir) / self.profile / "auto-send"
         self.auto_send_dir = Path(auto_send_dir).expanduser() if auto_send_dir else default_auto_send_dir
         if self.auto_mode:
@@ -136,23 +140,138 @@ class ArchipelRuntime:
             "auto_download_pending": len(self._auto_download_next_try),
         }
 
+    def _load_chat_history(self) -> None:
+        if not self._chat_path.exists():
+            return
+        try:
+            with self._chat_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    item = json.loads(line)
+                    if not isinstance(item, dict):
+                        continue
+                    role = str(item.get("role", "")).strip()
+                    text = str(item.get("text", "")).strip()
+                    peer = str(item.get("peer", "")).strip()
+                    ts = int(item.get("ts", int(time.time() * 1000)))
+                    if not role or not text:
+                        continue
+                    self._chat_history.append({"ts": ts, "role": role, "peer": peer, "text": text})
+        except Exception as exc:
+            self.log(f"[CHAT] Historique ignoré: {exc}")
+
+    def _append_chat_entry(self, entry: dict) -> None:
+        try:
+            with self._chat_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            self.log(f"[CHAT] Echec sauvegarde historique: {exc}")
+
     def chat_history_payload(self, limit: int = 30) -> list[dict]:
         if limit <= 0:
             return []
-        return list(self._chat_history)[-limit:]
+        with self._chat_lock:
+            return list(self._chat_history)[-limit:]
 
     def _record_chat(self, role: str, text: str, peer_node_id: str = "") -> None:
         text = text.strip()
         if not text:
             return
-        self._chat_history.append(
-            {
-                "ts": int(time.time() * 1000),
-                "role": role,
-                "peer": peer_node_id,
-                "text": text,
-            }
-        )
+        entry = {
+            "ts": int(time.time() * 1000),
+            "role": role,
+            "peer": peer_node_id,
+            "text": text,
+        }
+        with self._chat_lock:
+            self._chat_history.append(entry)
+        self._append_chat_entry(entry)
+
+    def conversations_payload(self, limit: int = 100) -> list[dict]:
+        latest_by_peer: dict[str, dict] = {}
+        with self._chat_lock:
+            entries = list(self._chat_history)
+
+        for item in entries:
+            role = str(item.get("role", ""))
+            peer = str(item.get("peer", ""))
+            if role not in {"me", "peer"} or not peer:
+                continue
+            prev = latest_by_peer.get(peer)
+            if prev is None or int(item.get("ts", 0)) >= int(prev.get("ts", 0)):
+                latest_by_peer[peer] = item
+
+        rows: list[dict] = []
+        for peer_id, last in latest_by_peer.items():
+            peer = self.table.get(peer_id)
+            rows.append(
+                {
+                    "peer_id": peer_id,
+                    "peer_short": f"{peer_id[:12]}...",
+                    "trusted": self.trust.is_trusted(peer_id),
+                    "online": peer is not None,
+                    "ip": peer.ip if peer is not None else "",
+                    "tcp_port": peer.tcp_port if peer is not None else 0,
+                    "last_ts": int(last.get("ts", 0)),
+                    "last_role": str(last.get("role", "")),
+                    "last_text": str(last.get("text", "")),
+                }
+            )
+
+        rows.sort(key=lambda x: int(x.get("last_ts", 0)), reverse=True)
+        if limit > 0:
+            rows = rows[:limit]
+        return rows
+
+    def peer_chat_payload(self, selector: str, limit: int = 120) -> dict:
+        selector = selector.strip()
+        peer = self.table.resolve(selector) if selector else None
+        if peer is not None:
+            peer_id = peer.node_id
+        else:
+            peer_id = selector
+        if not peer_id:
+            raise ValueError("peer requis")
+
+        with self._chat_lock:
+            entries = list(self._chat_history)
+        if peer is None:
+            has_history = any(str(x.get("peer", "")) == peer_id for x in entries)
+            if not has_history and len(peer_id) < 20:
+                raise ValueError("pair introuvable")
+        messages = [x for x in entries if str(x.get("peer", "")) == peer_id and str(x.get("role", "")) in {"me", "peer"}]
+        if limit > 0:
+            messages = messages[-limit:]
+
+        resolved = self.table.get(peer_id)
+        return {
+            "peer_id": peer_id,
+            "peer_short": f"{peer_id[:12]}...",
+            "trusted": self.trust.is_trusted(peer_id),
+            "online": resolved is not None,
+            "ip": resolved.ip if resolved is not None else "",
+            "tcp_port": resolved.tcp_port if resolved is not None else 0,
+            "messages": messages,
+        }
+
+    def send_message_to_peer(self, selector: str, text: str) -> dict:
+        peer = self.table.resolve(selector.strip())
+        if peer is None:
+            raise ValueError("pair introuvable (exact ou préfixe unique requis)")
+        text = text.strip()
+        if not text:
+            raise ValueError("texte vide")
+        self._ensure_trusted_or_raise(peer, "msg")
+        self.tcp.send_secure_message(peer, text)
+        self._record_chat("me", text, peer_node_id=peer.node_id)
+        return {
+            "peer_id": peer.node_id,
+            "peer_short": f"{peer.node_id[:12]}...",
+            "text": text,
+            "ts": int(time.time() * 1000),
+        }
 
     def _on_chat_received(self, from_node_id: str, text: str) -> None:
         self._record_chat("peer", text, peer_node_id=from_node_id)
@@ -513,7 +632,7 @@ class ArchipelRuntime:
             return (
                 "whoami | ai-status | auto-status | chat-history | ask </question> | add-peer <node_id> <ip> <port> "
                 "[ed25519_pub_b64] | peers | trusted | trust <node> | untrust <node> | files/receive | status | "
-                "msg <node> <texte> | msg @archipel-ai <question> | send <node> <filepath> | "
+                "conversations | chat <node> [limit] | msg <node> <texte> | msg @archipel-ai <question> | send <node> <filepath> | "
                 "download <file_id> [node] [output] | quit"
             )
 
@@ -560,6 +679,21 @@ class ArchipelRuntime:
         if cmd == "chat-history":
             return json.dumps(self.chat_history_payload(limit=30), indent=2)
 
+        if cmd == "conversations":
+            return json.dumps(self.conversations_payload(limit=100), indent=2)
+
+        if cmd == "chat":
+            if len(tokens) < 2:
+                return "[CLI] Usage: chat <node_id/prefix> [limit]"
+            selector = tokens[1]
+            limit = 120
+            if len(tokens) >= 3:
+                try:
+                    limit = max(1, min(500, int(tokens[2])))
+                except ValueError:
+                    return "[CLI] limit invalide"
+            return json.dumps(self.peer_chat_payload(selector, limit=limit), indent=2)
+
         if cmd in {"ask", "/ask"}:
             question = " ".join(tokens[1:]) if len(tokens) > 1 else ""
             return self._run_ai_query(question)
@@ -605,12 +739,10 @@ class ArchipelRuntime:
             if text.lower().startswith("@archipel-ai"):
                 question = text[len("@archipel-ai") :].strip()
                 return self._run_ai_query(question)
-            peer = self.table.resolve(tokens[1])
-            if peer is None:
-                return "[CLI] Pair introuvable (exact ou préfixe unique requis)"
-            self._ensure_trusted_or_raise(peer, "msg")
-            self.tcp.send_secure_message(peer, text)
-            self._record_chat("me", text, peer_node_id=peer.node_id)
+            try:
+                self.send_message_to_peer(tokens[1], text)
+            except ValueError as exc:
+                return f"[CLI] {exc}"
             return ""
 
         if cmd in {"quit", "exit"}:

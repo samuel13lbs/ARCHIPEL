@@ -182,6 +182,31 @@ def build_html() -> str:
       flex-wrap: wrap;
       margin-top: 8px;
     }
+    .conv-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      max-height: 320px;
+      overflow-y: auto;
+      margin-top: 8px;
+    }
+    .conv-item {
+      border: 1px solid #bdc9d5;
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #f7fbff;
+      color: var(--ink);
+      text-align: left;
+      font-weight: 600;
+    }
+    .conv-item.active {
+      border-color: #ffb470;
+      background: #fff4e8;
+    }
+    .thread {
+      min-height: 300px;
+      max-height: 360px;
+    }
   </style>
 </head>
 <body>
@@ -222,12 +247,10 @@ def build_html() -> str:
       </div>
     </div>
     <div class="panel">
-      <div class="label">Message pair</div>
-      <div class="row3">
-        <input id="msgPeer" placeholder="node_id ou prefix" />
-        <input id="msgText" placeholder="texte message" />
-        <input id="msgHint" placeholder="@archipel-ai ou vide" />
-        <button class="btn-main" onclick="sendPeerMsg()">Send</button>
+      <div class="label">Ouvrir conversation</div>
+      <div class="row">
+        <input id="openPeer" placeholder="node_id ou prefix" />
+        <button class="btn-main" onclick="openConversationFromInput()">Open</button>
       </div>
     </div>
     <div class="panel">
@@ -252,6 +275,22 @@ def build_html() -> str:
 
   <section class="grid2">
     <div class="panel">
+      <div class="label">Conversations</div>
+      <div id="conversations" class="conv-list"></div>
+    </div>
+    <div class="panel">
+      <div class="label">Discussion active</div>
+      <div id="threadMeta" class="muted">Aucune conversation sélectionnée.</div>
+      <div id="thread" class="box thread"></div>
+      <div class="row" style="margin-top:8px">
+        <input id="threadText" placeholder="Ecrire un message..." />
+        <button class="btn-main" onclick="sendThreadMessage()">Send</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div class="panel">
       <div class="label">Peers</div>
       <div id="peers" class="box"></div>
     </div>
@@ -263,8 +302,8 @@ def build_html() -> str:
 
   <section class="grid2">
     <div class="panel">
-      <div class="label">Chat History</div>
-      <div id="chat" class="box"></div>
+      <div class="label">Historique brut</div>
+      <div id="chatRaw" class="box"></div>
     </div>
     <div class="panel">
       <div class="label">Logs</div>
@@ -275,6 +314,7 @@ def build_html() -> str:
 
 <script>
 let lastSeq = 0;
+let activePeer = '';
 
 function getv(id) {
   return (document.getElementById(id).value || '').trim();
@@ -307,13 +347,104 @@ async function askAi() {
   await runCmd('ask ' + q);
 }
 
-async function sendPeerMsg() {
-  const peer = getv('msgPeer');
-  const txt = getv('msgText');
-  const hint = getv('msgHint');
-  if (!peer || !txt) return;
-  const payload = hint ? (hint + ' ' + txt) : txt;
-  await runCmd('msg ' + peer + ' ' + payload);
+async function openConversationFromInput() {
+  const selector = getv('openPeer');
+  if (!selector) return;
+  const r = await (await fetch('/api/messages?peer=' + encodeURIComponent(selector) + '&limit=120')).json();
+  if (!r.ok) {
+    document.getElementById('cmdOut').textContent = r.error || 'pair introuvable';
+    return;
+  }
+  activePeer = r.peer_id || selector;
+  await refreshConversations();
+  await refreshThread();
+}
+
+function formatMessageLine(m) {
+  const ts = Number(m.ts || 0);
+  const d = ts > 0 ? new Date(ts) : new Date();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const who = (m.role === 'me') ? 'ME' : 'PAIR';
+  return '[' + hh + ':' + mm + '] ' + who + ' > ' + (m.text || '');
+}
+
+async function refreshConversations() {
+  const data = await (await fetch('/api/conversations')).json();
+  const items = Array.isArray(data.items) ? data.items : [];
+  const box = document.getElementById('conversations');
+  box.innerHTML = '';
+
+  if (!items.length) {
+    activePeer = '';
+    box.textContent = 'Aucune conversation pour le moment.';
+    return;
+  }
+
+  if (activePeer && !items.some((x) => x.peer_id === activePeer)) {
+    activePeer = '';
+  }
+  if (!activePeer) {
+    activePeer = items[0].peer_id;
+  }
+
+  items.forEach((it) => {
+    const btn = document.createElement('button');
+    btn.className = 'conv-item' + (it.peer_id === activePeer ? ' active' : '');
+    const preview = String(it.last_text || '').replace(/\\s+/g, ' ').slice(0, 60);
+    const trust = it.trusted ? 'trusted' : 'untrusted';
+    const online = it.online ? 'online' : 'offline';
+    btn.textContent = it.peer_short + ' | ' + trust + ' | ' + online + ' | ' + preview;
+    btn.onclick = async () => {
+      activePeer = it.peer_id;
+      await refreshConversations();
+      await refreshThread();
+    };
+    box.appendChild(btn);
+  });
+}
+
+async function refreshThread() {
+  const meta = document.getElementById('threadMeta');
+  const box = document.getElementById('thread');
+  if (!activePeer) {
+    meta.textContent = 'Aucune conversation sélectionnée.';
+    box.textContent = '';
+    return;
+  }
+
+  const data = await (await fetch('/api/messages?peer=' + encodeURIComponent(activePeer) + '&limit=120')).json();
+  if (!data.ok) {
+    meta.textContent = data.error || 'Erreur conversation';
+    box.textContent = '';
+    return;
+  }
+
+  const trust = data.trusted ? 'trusted' : 'untrusted';
+  const online = data.online ? 'online' : 'offline';
+  const addr = data.ip ? (' ' + data.ip + ':' + data.tcp_port) : '';
+  meta.textContent = data.peer_short + ' | ' + trust + ' | ' + online + addr;
+
+  const messages = Array.isArray(data.messages) ? data.messages : [];
+  box.textContent = messages.length ? messages.map(formatMessageLine).join('\n') : '(Aucun message)';
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendThreadMessage() {
+  if (!activePeer) {
+    document.getElementById('cmdOut').textContent = 'Sélectionne d’abord une conversation.';
+    return;
+  }
+  const text = getv('threadText');
+  if (!text) return;
+  const out = await postJson('/api/messages/send', {peer: activePeer, text: text});
+  if (!out.ok) {
+    document.getElementById('cmdOut').textContent = out.error || 'Erreur envoi message';
+    return;
+  }
+  document.getElementById('threadText').value = '';
+  await refreshConversations();
+  await refreshThread();
 }
 
 async function runTransfer() {
@@ -347,7 +478,7 @@ async function refreshPanels() {
 
   document.getElementById('peers').textContent = JSON.stringify(s.peers, null, 2);
   document.getElementById('files').textContent = JSON.stringify(s.files, null, 2);
-  document.getElementById('chat').textContent = JSON.stringify(s.chat, null, 2);
+  document.getElementById('chatRaw').textContent = JSON.stringify(s.chat, null, 2);
 
   setPill('aiEnabled', 'AI: ' + (s.ai.enabled ? 'on' : 'off'), !!s.ai.enabled);
   setPill('aiConfigured', 'Key: ' + (s.ai.configured ? 'ok' : 'missing'), !!s.ai.configured);
@@ -355,6 +486,8 @@ async function refreshPanels() {
   const modelOk = s.ai.enabled && s.ai.configured;
   setPill('aiModel', 'Model: ' + model, modelOk);
   setPill('autoMode', 'Auto: ' + (s.auto.enabled ? 'on' : 'off'), !!s.auto.enabled);
+  await refreshConversations();
+  await refreshThread();
 }
 
 async function pollLogs() {
@@ -379,6 +512,9 @@ document.getElementById('cmd').addEventListener('keydown', (e) => {
 });
 document.getElementById('askText').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') askAi();
+});
+document.getElementById('threadText').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendThreadMessage();
 });
 </script>
 </body>
@@ -467,6 +603,34 @@ def main() -> int:
                 )
                 return
 
+            if parsed.path == "/api/conversations":
+                q = parse_qs(parsed.query)
+                try:
+                    limit = max(1, min(300, int(q.get("limit", ["120"])[0])))
+                except ValueError:
+                    limit = 120
+                self._json(HTTPStatus.OK, {"items": runtime.conversations_payload(limit=limit)})
+                return
+
+            if parsed.path == "/api/messages":
+                q = parse_qs(parsed.query)
+                selector = str(q.get("peer", [""])[0]).strip()
+                if not selector:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "peer requis"})
+                    return
+                try:
+                    limit = max(1, min(500, int(q.get("limit", ["120"])[0])))
+                except ValueError:
+                    limit = 120
+                try:
+                    payload = runtime.peer_chat_payload(selector, limit=limit)
+                except Exception as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                    return
+                payload["ok"] = True
+                self._json(HTTPStatus.OK, payload)
+                return
+
             if parsed.path == "/api/logs":
                 q = parse_qs(parsed.query)
                 since = int(q.get("since", ["0"])[0])
@@ -476,6 +640,17 @@ def main() -> int:
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
         def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/api/messages/send":
+                try:
+                    body = self._read_json()
+                    selector = str(body.get("peer", "")).strip()
+                    text = str(body.get("text", "")).strip()
+                    item = runtime.send_message_to_peer(selector, text)
+                    self._json(HTTPStatus.OK, {"ok": True, "item": item})
+                except Exception as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+                return
+
             if self.path == "/api/command":
                 try:
                     body = self._read_json()
