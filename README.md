@@ -78,6 +78,12 @@ python -m web.server --node-port 7777 --web-port 8080
 
 Ouvrir ensuite `http://127.0.0.1:8080`.
 
+L'interface Web est organisée en pages:
+- `Dashboard`: statut global, commandes libres, logs, assistant IA.
+- `Messages`: envoi de messages + trust/untrust + historique chat.
+- `Fichiers`: envoi et téléchargement de fichiers chunkés.
+- `Peers`: tableau structuré des pairs (`node_id`, IP, port, trust, last_seen) + ajout manuel.
+
 ## Commandes disponibles (CLI/Web)
 
 - `help`

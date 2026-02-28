@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import json
 import os
 import signal
@@ -30,89 +30,126 @@ class LogBuffer:
 
 def build_html() -> str:
     return """<!doctype html>
-<html lang="fr">
+<html lang=\"fr\">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Archipel Console</title>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Archipel UI</title>
   <style>
     :root {
-      --bg1: #0a2239;
-      --bg2: #17324d;
-      --panel: rgba(255, 255, 255, 0.95);
-      --ink: #0d1b2a;
-      --muted: #5f6f82;
-      --accent: #ff7f11;
-      --ok: #2a9d8f;
-      --bad: #b00020;
-      --dark: #0f172a;
-      --border: #d8e1ea;
+      --bg: #0b1f3a;
+      --bg-soft: #12345f;
+      --panel: #f5f8fc;
+      --line: #d0dae7;
+      --ink: #132338;
+      --muted: #5e7189;
+      --primary: #ef7d21;
+      --ok: #198754;
+      --bad: #b02a37;
+      --log: #111b2a;
+      --nav: #0f2a4d;
+      --nav-active: #ef7d21;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      color: var(--ink);
-      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
       min-height: 100vh;
+      color: var(--ink);
+      font-family: \"Segoe UI\", \"Trebuchet MS\", sans-serif;
       background:
-        radial-gradient(circle at 8% 15%, #2b5876 0%, transparent 30%),
-        radial-gradient(circle at 92% 8%, #e76f51 0%, transparent 26%),
-        linear-gradient(140deg, var(--bg1), var(--bg2));
+        radial-gradient(circle at 88% 10%, #244d7f 0%, transparent 28%),
+        radial-gradient(circle at 12% 12%, #365e8d 0%, transparent 24%),
+        linear-gradient(140deg, var(--bg), var(--bg-soft));
     }
-    .wrap {
-      width: min(1220px, 96vw);
-      margin: 18px auto 24px;
+    .shell {
+      width: min(1280px, 96vw);
+      margin: 14px auto 18px;
       display: grid;
       gap: 12px;
     }
     .panel {
       background: var(--panel);
-      border: 1px solid rgba(255,255,255,0.65);
+      border: 1px solid rgba(255, 255, 255, 0.6);
       border-radius: 14px;
-      box-shadow: 0 12px 24px rgba(0,0,0,.17);
+      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.16);
       padding: 14px;
     }
-    .top {
+    .header {
       display: flex;
-      align-items: center;
       justify-content: space-between;
       gap: 10px;
+      align-items: center;
       flex-wrap: wrap;
     }
-    h1 { margin: 0; font-size: 24px; }
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: 0.2px;
+    }
     .muted { color: var(--muted); }
-    .pill {
+    .badge {
       display: inline-block;
-      padding: 4px 10px;
+      border: 1px solid var(--line);
       border-radius: 999px;
+      padding: 4px 10px;
       font-size: 12px;
       font-weight: 700;
+      background: #ebf0f7;
       margin-right: 6px;
-      background: #ecf0f6;
-      border: 1px solid #c8d3df;
     }
-    .pill.ok { background: #ddf6f2; color: #0f6f63; border-color: #98d8cf; }
-    .pill.bad { background: #ffe7eb; color: #8d0e2c; border-color: #ffc8d3; }
+    .badge.ok {
+      border-color: #7fddb3;
+      background: #dff8ec;
+      color: #0f6b44;
+    }
+    .badge.bad {
+      border-color: #f2a9b2;
+      background: #fde8eb;
+      color: #8b1f2a;
+    }
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      background: var(--nav);
+      border-radius: 12px;
+      padding: 8px;
+    }
+    .tab {
+      border: none;
+      border-radius: 8px;
+      padding: 9px 14px;
+      background: rgba(255, 255, 255, 0.1);
+      color: #dce8f7;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .tab.active {
+      background: var(--nav-active);
+      color: #fff;
+    }
+    .page { display: none; }
+    .page.active { display: block; }
+
     .grid2 {
       display: grid;
-      grid-template-columns: 1fr;
       gap: 12px;
-    }
-    @media (min-width: 980px) {
-      .grid2 { grid-template-columns: 1fr 1fr; }
+      grid-template-columns: 1fr;
     }
     .grid3 {
       display: grid;
-      grid-template-columns: 1fr;
       gap: 12px;
+      grid-template-columns: 1fr;
     }
     @media (min-width: 980px) {
+      .grid2 { grid-template-columns: 1fr 1fr; }
       .grid3 { grid-template-columns: repeat(3, 1fr); }
     }
+
     .label {
       font-size: 13px;
       font-weight: 700;
-      margin-bottom: 5px;
+      margin-bottom: 6px;
     }
     .row {
       display: grid;
@@ -121,163 +158,284 @@ def build_html() -> str:
     }
     .row3 {
       display: grid;
-      grid-template-columns: 1fr 1fr 1fr auto;
+      grid-template-columns: 1fr 1fr auto;
       gap: 8px;
     }
     .row4 {
       display: grid;
-      grid-template-columns: 1.2fr 1fr 1fr 1fr auto;
+      grid-template-columns: 1fr 1fr 1fr auto;
       gap: 8px;
     }
     @media (max-width: 860px) {
       .row3, .row4 { grid-template-columns: 1fr; }
     }
+
     input, textarea {
       width: 100%;
-      border: 1px solid #bdc9d5;
-      border-radius: 9px;
-      padding: 9px 11px;
+      border: 1px solid #bdc9d7;
+      border-radius: 8px;
+      padding: 9px 10px;
       font-size: 14px;
       background: #fff;
       color: var(--ink);
     }
-    textarea { min-height: 86px; resize: vertical; }
+    textarea { min-height: 80px; resize: vertical; }
+
     button {
       border: none;
-      border-radius: 9px;
-      padding: 9px 13px;
+      border-radius: 8px;
+      padding: 9px 12px;
       font-weight: 700;
       cursor: pointer;
     }
-    .btn-main { background: var(--accent); color: #fff; }
+    .btn-main { background: var(--primary); color: #fff; }
     .btn-dark { background: #1f2937; color: #fff; }
     .btn-ok { background: var(--ok); color: #fff; }
+    .btn-bad { background: var(--bad); color: #fff; }
+
     .box {
-      background: #eef4f9;
-      border: 1px solid var(--border);
-      border-radius: 11px;
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
       padding: 10px;
-      font-family: Consolas, "Courier New", monospace;
+      background: #edf3f9;
+      font-family: Consolas, \"Courier New\", monospace;
+      font-size: 12px;
       white-space: pre-wrap;
       overflow-y: auto;
-      max-height: 250px;
-      margin-top: 8px;
-      font-size: 12px;
+      max-height: 300px;
     }
-    .logbox {
-      background: var(--dark);
-      color: #e2e8f0;
-      border-radius: 11px;
+    .logs {
+      background: var(--log);
+      color: #e4ebf6;
+      border-radius: 10px;
       padding: 10px;
-      font-family: Consolas, "Courier New", monospace;
+      font-family: Consolas, \"Courier New\", monospace;
+      font-size: 12px;
       white-space: pre-wrap;
       overflow-y: auto;
-      max-height: 280px;
-      margin-top: 8px;
-      font-size: 12px;
+      max-height: 330px;
     }
-    .kpi {
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    th, td {
+      text-align: left;
+      border-bottom: 1px solid #e6edf6;
+      padding: 8px 10px;
+      vertical-align: top;
+      word-break: break-word;
+    }
+    th {
+      background: #ebf2fb;
+      font-weight: 700;
+      color: #243a57;
+    }
+    .kpis {
       display: flex;
-      gap: 8px;
       flex-wrap: wrap;
+      gap: 8px;
       margin-top: 8px;
     }
   </style>
 </head>
 <body>
-<div class="wrap">
-  <section class="panel">
-    <div class="top">
+<div class=\"shell\">
+  <section class=\"panel\">
+    <div class=\"header\">
       <div>
-        <h1>Archipel Web Console</h1>
-        <div id="statusLine" class="muted">Chargement...</div>
+        <h1>Archipel Control Center</h1>
+        <div id=\"statusLine\" class=\"muted\">Chargement...</div>
       </div>
       <div>
-        <button class="btn-main" onclick="runCmd('status')">Refresh</button>
+        <button class=\"btn-main\" onclick=\"refreshAll()\">Refresh</button>
       </div>
     </div>
-    <div class="kpi">
-      <span id="aiEnabled" class="pill">AI: ...</span>
-      <span id="aiConfigured" class="pill">Key: ...</span>
-      <span id="aiModel" class="pill">Model: ...</span>
-      <span id="autoMode" class="pill">Auto: ...</span>
+    <div class=\"kpis\">
+      <span id=\"aiEnabled\" class=\"badge\">AI: ...</span>
+      <span id=\"aiConfigured\" class=\"badge\">Key: ...</span>
+      <span id=\"aiModel\" class=\"badge\">Model: ...</span>
+      <span id=\"autoMode\" class=\"badge\">Auto: ...</span>
     </div>
   </section>
 
-  <section class="panel">
-    <div class="label">Commande libre</div>
-    <div class="row">
-      <input id="cmd" placeholder="Ex: peers | trust <prefix> | msg <prefix> bonjour | ask comment tester?" />
-      <button class="btn-dark" onclick="sendCmd()">Run</button>
-    </div>
-    <div id="cmdOut" class="box" style="max-height:160px"></div>
-  </section>
+  <nav class=\"nav panel\">
+    <button class=\"tab\" data-page=\"dashboard\" onclick=\"setPage('dashboard')\">Dashboard</button>
+    <button class=\"tab\" data-page=\"messages\" onclick=\"setPage('messages')\">Messages</button>
+    <button class=\"tab\" data-page=\"files\" onclick=\"setPage('files')\">Fichiers</button>
+    <button class=\"tab\" data-page=\"peers\" onclick=\"setPage('peers')\">Peers</button>
+  </nav>
 
-  <section class="grid3">
-    <div class="panel">
-      <div class="label">Trust pair</div>
-      <div class="row">
-        <input id="trustPeer" placeholder="node_id ou prefix" />
-        <button class="btn-ok" onclick="runCmd('trust ' + getv('trustPeer'))">Trust</button>
+  <section id=\"page-dashboard\" class=\"panel page\">
+    <div class=\"label\">Commande libre</div>
+    <div class=\"row\">
+      <input id=\"cmd\" placeholder=\"Ex: status | peers | trust <prefix> | ai-status\" />
+      <button class=\"btn-dark\" onclick=\"sendCmd()\">Run</button>
+    </div>
+    <div id=\"cmdOut\" class=\"box\" style=\"max-height:180px\"></div>
+
+    <div class=\"grid2\" style=\"margin-top:12px\">
+      <div>
+        <div class=\"label\">Question Gemini</div>
+        <div class=\"row\">
+          <input id=\"askText\" placeholder=\"ask explique mon statut reseau\" />
+          <button class=\"btn-main\" onclick=\"askAi()\">Ask</button>
+        </div>
+      </div>
+      <div>
+        <div class=\"label\">Historique chat global</div>
+        <div id=\"chat\" class=\"box\"></div>
       </div>
     </div>
-    <div class="panel">
-      <div class="label">Message pair</div>
-      <div class="row3">
-        <input id="msgPeer" placeholder="node_id ou prefix" />
-        <input id="msgText" placeholder="texte message" />
-        <input id="msgHint" placeholder="@archipel-ai ou vide" />
-        <button class="btn-main" onclick="sendPeerMsg()">Send</button>
+
+    <div style=\"margin-top:12px\">
+      <div class=\"label\">Logs temps réel</div>
+      <div id=\"logs\" class=\"logs\"></div>
+    </div>
+  </section>
+
+  <section id=\"page-messages\" class=\"panel page\">
+    <div class=\"grid2\">
+      <div>
+        <div class=\"label\">Envoyer un message</div>
+        <div class=\"row3\">
+          <input id=\"msgPeer\" placeholder=\"node_id ou prefix\" />
+          <input id=\"msgText\" placeholder=\"message\" />
+          <button class=\"btn-main\" onclick=\"sendPeerMsg()\">Send</button>
+        </div>
+        <div class=\"muted\" style=\"margin-top:6px\">Le pair doit etre trusted pour envoyer.</div>
+      </div>
+      <div>
+        <div class=\"label\">Trust management</div>
+        <div class=\"row3\">
+          <input id=\"trustPeer\" placeholder=\"node_id ou prefix\" />
+          <button class=\"btn-ok\" onclick=\"runCmd('trust ' + getv('trustPeer'))\">Trust</button>
+          <button class=\"btn-bad\" onclick=\"runCmd('untrust ' + getv('trustPeer'))\">Untrust</button>
+        </div>
       </div>
     </div>
-    <div class="panel">
-      <div class="label">Gemini ask</div>
-      <div class="row">
-        <input id="askText" placeholder="/ask Quel est le plan de test?" />
-        <button class="btn-main" onclick="askAi()">Ask</button>
+
+    <div style=\"margin-top:12px\">
+      <div class=\"label\">Chat history (JSON)</div>
+      <div id=\"chatMessages\" class=\"box\" style=\"max-height:420px\"></div>
+    </div>
+  </section>
+
+  <section id=\"page-files\" class=\"panel page\">
+    <div class=\"grid2\">
+      <div>
+        <div class=\"label\">Envoyer un fichier</div>
+        <div class=\"row3\">
+          <input id=\"sendPeer\" placeholder=\"node_id ou prefix\" />
+          <input id=\"sendFile\" placeholder=\"chemin local complet\" />
+          <button class=\"btn-main\" onclick=\"sendFileToPeer()\">Send</button>
+        </div>
+      </div>
+      <div>
+        <div class=\"label\">Télécharger un fichier</div>
+        <div class=\"row4\">
+          <input id=\"dlFileId\" placeholder=\"file_id\" />
+          <input id=\"dlPeer\" placeholder=\"peer source (optionnel)\" />
+          <input id=\"dlOut\" placeholder=\"output_path (optionnel)\" />
+          <button class=\"btn-main\" onclick=\"downloadFile()\">Download</button>
+        </div>
       </div>
     </div>
-  </section>
 
-  <section class="panel">
-    <div class="label">Transfer</div>
-    <div class="row4">
-      <input id="sendPeer" placeholder="peer pour send" />
-      <input id="sendFile" placeholder="chemin fichier local a envoyer" />
-      <input id="dlFileId" placeholder="file_id pour download" />
-      <input id="dlPeer" placeholder="peer source (optionnel)" />
-      <button class="btn-main" onclick="runTransfer()">Run</button>
+    <div style=\"margin-top:12px\">
+      <div class=\"label\">Manifests disponibles</div>
+      <div id=\"files\" class=\"box\" style=\"max-height:420px\"></div>
     </div>
   </section>
 
-  <section class="grid2">
-    <div class="panel">
-      <div class="label">Peers</div>
-      <div id="peers" class="box"></div>
+  <section id=\"page-peers\" class=\"panel page\">
+    <div class=\"grid2\">
+      <div>
+        <div class=\"label\">Ajouter peer manuellement</div>
+        <div class=\"row4\">
+          <input id=\"apNode\" placeholder=\"node_id\" />
+          <input id=\"apIp\" placeholder=\"ip\" />
+          <input id=\"apPort\" placeholder=\"port\" />
+          <button class=\"btn-main\" onclick=\"addPeerManual()\">Add peer</button>
+        </div>
+        <div class=\"muted\" style=\"margin-top:6px\">Utilise cette option si multicast LAN est bloqué.</div>
+      </div>
+      <div>
+        <div class=\"label\">Trusted nodes</div>
+        <div id=\"trusted\" class=\"box\" style=\"max-height:170px\"></div>
+      </div>
     </div>
-    <div class="panel">
-      <div class="label">Files</div>
-      <div id="files" class="box"></div>
-    </div>
-  </section>
 
-  <section class="grid2">
-    <div class="panel">
-      <div class="label">Chat History</div>
-      <div id="chat" class="box"></div>
-    </div>
-    <div class="panel">
-      <div class="label">Logs</div>
-      <div id="logs" class="logbox"></div>
+    <div style=\"margin-top:12px\">
+      <div class=\"label\">Peers disponibles (avec ports)</div>
+      <div style=\"overflow:auto; margin-top:8px\">
+        <table>
+          <thead>
+            <tr>
+              <th>Node ID</th>
+              <th>IP</th>
+              <th>Port</th>
+              <th>Trusted</th>
+              <th>Last Seen</th>
+            </tr>
+          </thead>
+          <tbody id=\"peersRows\">
+            <tr><td colspan=\"5\" class=\"muted\">Chargement...</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </section>
 </div>
 
 <script>
 let lastSeq = 0;
+let appState = null;
+const pages = ['dashboard', 'messages', 'files', 'peers'];
 
 function getv(id) {
   return (document.getElementById(id).value || '').trim();
+}
+
+function esc(v) {
+  return String(v || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function setBadge(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.classList.remove('ok', 'bad');
+  el.classList.add(ok ? 'ok' : 'bad');
+}
+
+function setPage(page) {
+  const selected = pages.includes(page) ? page : 'dashboard';
+  pages.forEach((name) => {
+    const sec = document.getElementById('page-' + name);
+    if (sec) sec.classList.toggle('active', name === selected);
+  });
+  document.querySelectorAll('.tab').forEach((el) => {
+    el.classList.toggle('active', el.dataset.page === selected);
+  });
+  if (window.location.hash !== '#' + selected) {
+    window.location.hash = selected;
+  }
+}
+
+function pageFromHash() {
+  const raw = (window.location.hash || '').replace('#', '').trim().toLowerCase();
+  return pages.includes(raw) ? raw : 'dashboard';
 }
 
 async function postJson(url, body) {
@@ -294,7 +452,7 @@ async function runCmd(command) {
   if (!cmd) return;
   const out = await postJson('/api/command', {command: cmd});
   document.getElementById('cmdOut').textContent = out.output || '';
-  await refreshPanels();
+  await refreshAll();
 }
 
 async function sendCmd() {
@@ -310,51 +468,103 @@ async function askAi() {
 async function sendPeerMsg() {
   const peer = getv('msgPeer');
   const txt = getv('msgText');
-  const hint = getv('msgHint');
   if (!peer || !txt) return;
-  const payload = hint ? (hint + ' ' + txt) : txt;
-  await runCmd('msg ' + peer + ' ' + payload);
+  await runCmd('msg ' + peer + ' ' + txt);
 }
 
-async function runTransfer() {
-  const sendPeer = getv('sendPeer');
-  const sendFile = getv('sendFile');
-  const dlFileId = getv('dlFileId');
-  const dlPeer = getv('dlPeer');
-  if (sendPeer && sendFile) {
-    await runCmd('send ' + sendPeer + ' "' + sendFile + '"');
+async function sendFileToPeer() {
+  const peer = getv('sendPeer');
+  const path = getv('sendFile');
+  if (!peer || !path) return;
+  await runCmd('send ' + peer + ' "' + path + '"');
+}
+
+async function downloadFile() {
+  const id = getv('dlFileId');
+  const peer = getv('dlPeer');
+  const out = getv('dlOut');
+  if (!id) return;
+  let cmd = 'download ' + id;
+  if (peer) cmd += ' ' + peer;
+  if (out) cmd += ' "' + out + '"';
+  await runCmd(cmd);
+}
+
+async function addPeerManual() {
+  const node = getv('apNode');
+  const ip = getv('apIp');
+  const port = getv('apPort');
+  if (!node || !ip || !port) return;
+  await runCmd('add-peer ' + node + ' ' + ip + ' ' + port);
+}
+
+function formatTs(epochSecs) {
+  const n = Number(epochSecs || 0);
+  if (!n) return '';
+  const d = new Date(n * 1000);
+  return d.toLocaleString();
+}
+
+function renderPeers(peers) {
+  const body = document.getElementById('peersRows');
+  if (!Array.isArray(peers) || !peers.length) {
+    body.innerHTML = '<tr><td colspan=\"5\" class=\"muted\">Aucun peer detecte</td></tr>';
     return;
   }
-  if (dlFileId) {
-    const cmd = dlPeer ? ('download ' + dlFileId + ' ' + dlPeer) : ('download ' + dlFileId);
-    await runCmd(cmd);
-  }
+  body.innerHTML = peers.map((p) => {
+    const node = esc(p.node_id || '');
+    const ip = esc(p.ip || '');
+    const port = esc(p.tcp_port || '');
+    const trusted = p.trusted ? 'yes' : 'no';
+    const last = formatTs(p.last_seen);
+    return '<tr>' +
+      '<td>' + node + '</td>' +
+      '<td>' + ip + '</td>' +
+      '<td>' + port + '</td>' +
+      '<td>' + trusted + '</td>' +
+      '<td>' + esc(last) + '</td>' +
+      '</tr>';
+  }).join('');
 }
 
-function setPill(id, text, ok) {
-  const el = document.getElementById(id);
-  el.textContent = text;
-  el.classList.remove('ok', 'bad');
-  el.classList.add(ok ? 'ok' : 'bad');
+function renderTrusted(trusted) {
+  document.getElementById('trusted').textContent = JSON.stringify(trusted || [], null, 2);
 }
 
-async function refreshPanels() {
-  const s = await (await fetch('/api/state')).json();
+function renderFiles(files) {
+  document.getElementById('files').textContent = JSON.stringify(files || [], null, 2);
+}
+
+function renderChat(chat) {
+  const txt = JSON.stringify(chat || [], null, 2);
+  document.getElementById('chat').textContent = txt;
+  document.getElementById('chatMessages').textContent = txt;
+}
+
+function renderHeader(state) {
+  const s = state.status || {};
+  const ai = state.ai || {};
+  const auto = state.auto || {};
+  const nodeId = String(s.node_id || '');
   document.getElementById('statusLine').textContent =
-    'node=' + s.status.node_id.slice(0, 12) + '... peers=' + s.status.peers +
-    ' trusted=' + s.status.trusted + ' files=' + s.status.manifests + ' tcp=' + s.status.tcp_port +
-    ' auto=' + (s.auto.enabled ? 'on' : 'off');
+    'node=' + nodeId.slice(0, 12) + '... peers=' + (s.peers || 0) +
+    ' trusted=' + (s.trusted || 0) + ' files=' + (s.manifests || 0) +
+    ' tcp=' + (s.tcp_port || '') + ' auto=' + (auto.enabled ? 'on' : 'off');
 
-  document.getElementById('peers').textContent = JSON.stringify(s.peers, null, 2);
-  document.getElementById('files').textContent = JSON.stringify(s.files, null, 2);
-  document.getElementById('chat').textContent = JSON.stringify(s.chat, null, 2);
+  setBadge('aiEnabled', 'AI: ' + (ai.enabled ? 'on' : 'off'), !!ai.enabled);
+  setBadge('aiConfigured', 'Key: ' + (ai.configured ? 'ok' : 'missing'), !!ai.configured);
+  setBadge('aiModel', 'Model: ' + (ai.model || 'n/a'), !!(ai.enabled && ai.configured));
+  setBadge('autoMode', 'Auto: ' + (auto.enabled ? 'on' : 'off'), !!auto.enabled);
+}
 
-  setPill('aiEnabled', 'AI: ' + (s.ai.enabled ? 'on' : 'off'), !!s.ai.enabled);
-  setPill('aiConfigured', 'Key: ' + (s.ai.configured ? 'ok' : 'missing'), !!s.ai.configured);
-  const model = s.ai.model || 'n/a';
-  const modelOk = s.ai.enabled && s.ai.configured;
-  setPill('aiModel', 'Model: ' + model, modelOk);
-  setPill('autoMode', 'Auto: ' + (s.auto.enabled ? 'on' : 'off'), !!s.auto.enabled);
+async function refreshState() {
+  const s = await (await fetch('/api/state')).json();
+  appState = s;
+  renderHeader(s);
+  renderPeers(s.peers || []);
+  renderTrusted(s.trusted || []);
+  renderFiles(s.files || []);
+  renderChat(s.chat || []);
 }
 
 async function pollLogs() {
@@ -369,16 +579,28 @@ async function pollLogs() {
   }
 }
 
+async function refreshAll() {
+  await refreshState();
+  await pollLogs();
+}
+
+window.addEventListener('hashchange', () => setPage(pageFromHash()));
+
+setInterval(refreshState, 3000);
 setInterval(pollLogs, 1000);
-setInterval(refreshPanels, 3000);
-refreshPanels();
-pollLogs();
+refreshAll();
+setPage(pageFromHash());
 
 document.getElementById('cmd').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') sendCmd();
 });
+
 document.getElementById('askText').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') askAi();
+});
+
+document.getElementById('msgText').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendPeerMsg();
 });
 </script>
 </body>
@@ -520,4 +742,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
