@@ -10,13 +10,15 @@ def log(msg: str) -> None:
     print(time.strftime("%H:%M:%S"), msg, flush=True)
 
 
-def run_start(port: int, hello_interval: int, state_dir: str, no_ai: bool) -> None:
+def run_start(port: int, hello_interval: int, state_dir: str, no_ai: bool, auto: bool, auto_send_dir: str) -> None:
     runtime = ArchipelRuntime(
         port=port,
         hello_interval=hello_interval,
         state_dir=state_dir,
         logger=log,
         ai_enabled=not no_ai,
+        auto_mode=auto,
+        auto_send_dir=auto_send_dir,
     )
     runtime.start()
 
@@ -34,7 +36,7 @@ def run_start(port: int, hello_interval: int, state_dir: str, no_ai: bool) -> No
         signal.signal(signal.SIGTERM, shutdown)
 
     log(
-        "[CLI] Commandes: help | whoami | ai-status | chat-history | ask | add-peer <node_id> <ip> <port> "
+        "[CLI] Commandes: help | whoami | ai-status | auto-status | chat-history | ask | add-peer <node_id> <ip> <port> "
         "[ed25519_pub_b64] | peers | trusted | trust <node> | untrust <node> | files | status | msg | send | "
         "download | quit"
     )
@@ -68,11 +70,20 @@ def main() -> int:
     p_start.add_argument("--hello-interval", type=int, default=30)
     p_start.add_argument("--state-dir", type=str, default=".archipel")
     p_start.add_argument("--no-ai", action="store_true", help="Désactiver l'intégration Gemini")
+    p_start.add_argument("--auto", action="store_true", help="Activer auto trust/download/share sans intervention")
+    p_start.add_argument("--auto-send-dir", type=str, default="", help="Dossier a partager automatiquement (mode --auto)")
 
     args = parser.parse_args()
 
     if args.cmd == "start":
-        run_start(port=args.port, hello_interval=args.hello_interval, state_dir=args.state_dir, no_ai=args.no_ai)
+        run_start(
+            port=args.port,
+            hello_interval=args.hello_interval,
+            state_dir=args.state_dir,
+            no_ai=args.no_ai,
+            auto=args.auto,
+            auto_send_dir=args.auto_send_dir,
+        )
         return 0
 
     return 1

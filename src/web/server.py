@@ -199,6 +199,7 @@ def build_html() -> str:
       <span id="aiEnabled" class="pill">AI: ...</span>
       <span id="aiConfigured" class="pill">Key: ...</span>
       <span id="aiModel" class="pill">Model: ...</span>
+      <span id="autoMode" class="pill">Auto: ...</span>
     </div>
   </section>
 
@@ -340,7 +341,8 @@ async function refreshPanels() {
   const s = await (await fetch('/api/state')).json();
   document.getElementById('statusLine').textContent =
     'node=' + s.status.node_id.slice(0, 12) + '... peers=' + s.status.peers +
-    ' trusted=' + s.status.trusted + ' files=' + s.status.manifests + ' tcp=' + s.status.tcp_port;
+    ' trusted=' + s.status.trusted + ' files=' + s.status.manifests + ' tcp=' + s.status.tcp_port +
+    ' auto=' + (s.auto.enabled ? 'on' : 'off');
 
   document.getElementById('peers').textContent = JSON.stringify(s.peers, null, 2);
   document.getElementById('files').textContent = JSON.stringify(s.files, null, 2);
@@ -351,6 +353,7 @@ async function refreshPanels() {
   const model = s.ai.model || 'n/a';
   const modelOk = s.ai.enabled && s.ai.configured;
   setPill('aiModel', 'Model: ' + model, modelOk);
+  setPill('autoMode', 'Auto: ' + (s.auto.enabled ? 'on' : 'off'), !!s.auto.enabled);
 }
 
 async function pollLogs() {
@@ -389,6 +392,8 @@ def main() -> int:
     parser.add_argument("--hello-interval", type=int, default=30)
     parser.add_argument("--state-dir", type=str, default=".archipel")
     parser.add_argument("--no-ai", action="store_true", help="Desactiver l'integration Gemini")
+    parser.add_argument("--auto", action="store_true", help="Activer auto trust/download/share")
+    parser.add_argument("--auto-send-dir", type=str, default="", help="Dossier auto-share (mode --auto)")
     args = parser.parse_args()
 
     logs = LogBuffer()
@@ -404,6 +409,8 @@ def main() -> int:
         state_dir=args.state_dir,
         logger=logger,
         ai_enabled=not args.no_ai,
+        auto_mode=args.auto,
+        auto_send_dir=args.auto_send_dir,
     )
     runtime.start()
 
@@ -445,6 +452,7 @@ def main() -> int:
                         "trusted": runtime.trust.list_trusted(),
                         "chat": runtime.chat_history_payload(limit=30),
                         "ai": runtime.ai_status_payload(),
+                        "auto": runtime.auto_status_payload(),
                     },
                 )
                 return

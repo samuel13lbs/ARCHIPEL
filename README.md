@@ -61,6 +61,7 @@ python -m pip install --user cryptography
 $env:PYTHONPATH="src"
 python -m cli.archipel start --port 7777
 # mode offline strict (sans IA): python -m cli.archipel start --port 7777 --no-ai
+# mode automatique (trust + download + partage dossier): python -m cli.archipel start --port 7777 --auto
 ```
 
 ## Lancement Web UI (offline)
@@ -69,6 +70,7 @@ python -m cli.archipel start --port 7777
 $env:PYTHONPATH="src"
 python -m web.server --node-port 7777 --web-port 8080
 # mode offline strict (sans IA): python -m web.server --node-port 7777 --web-port 8080 --no-ai
+# mode automatique: python -m web.server --node-port 7777 --web-port 8080 --auto
 ```
 
 Ouvrir ensuite `http://127.0.0.1:8080`.
@@ -78,6 +80,7 @@ Ouvrir ensuite `http://127.0.0.1:8080`.
 - `help`
 - `whoami`
 - `ai-status`
+- `auto-status`
 - `chat-history`
 - `ask <question>` (alias: `/ask <question>`)
 - `add-peer <node_id> <ip> <port> [ed25519_pub_b64]`
@@ -92,6 +95,11 @@ Ouvrir ensuite `http://127.0.0.1:8080`.
 - `files`
 - `download <file_id> [node_id|prefix] [output_path]`
 - `status`
+
+En mode `--auto`:
+- trust automatique des peers découverts,
+- téléchargement automatique des manifests reçus,
+- partage automatique des fichiers déposés dans `.archipel/node-<port>/auto-send/` (ou `--auto-send-dir`).
 
 ## Guide démo (3 cas d'usage)
 

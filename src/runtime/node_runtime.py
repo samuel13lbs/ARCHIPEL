@@ -30,16 +30,27 @@ class ArchipelRuntime:
         logger: Callable[[str], None],
         ai_enabled: bool = True,
         ai_context_messages: int = 12,
+        auto_mode: bool = False,
+        auto_send_dir: str = "",
     ) -> None:
         self.port = port
         self.hello_interval = hello_interval
         self.state_dir = state_dir
         self.log = logger
+        self.auto_mode = auto_mode
         self._chat_history: deque[dict] = deque(maxlen=200)
         self.ai_context_messages = max(1, ai_context_messages)
         self.ai = GeminiClient.from_env(enabled=ai_enabled, logger=self.log)
+        self._bg_stop = threading.Event()
+        self._auto_download_done: set[str] = set()
+        self._auto_download_next_try: dict[str, float] = {}
+        self._auto_send_seen: set[str] = set()
 
         self.profile = f"node-{port}"
+        default_auto_send_dir = Path(state_dir) / self.profile / "auto-send"
+        self.auto_send_dir = Path(auto_send_dir).expanduser() if auto_send_dir else default_auto_send_dir
+        if self.auto_mode:
+            self.auto_send_dir.mkdir(parents=True, exist_ok=True)
         self.identity = load_or_create_identity(state_dir, profile=self.profile)
         self.trust = TrustStore(state_dir, profile=self.profile)
         peer_table_path = Path(state_dir) / self.profile / "peers.json"
@@ -73,9 +84,15 @@ class ArchipelRuntime:
         )
         self.tcp.start()
         self.discovery.start()
+        if self.auto_mode:
+            self.log(f"[AUTO] mode=on auto_send_dir={self.auto_send_dir}")
+            threading.Thread(target=self._auto_trust_loop, daemon=True).start()
+            threading.Thread(target=self._auto_download_loop, daemon=True).start()
+            threading.Thread(target=self._auto_send_loop, daemon=True).start()
 
     def stop(self) -> None:
         self.log("[NODE] Arrêt...")
+        self._bg_stop.set()
         self.discovery.stop()
         self.tcp.stop()
 
@@ -98,6 +115,14 @@ class ArchipelRuntime:
 
     def ai_status_payload(self) -> dict:
         return self.ai.status()
+
+    def auto_status_payload(self) -> dict:
+        return {
+            "enabled": self.auto_mode,
+            "auto_send_dir": str(self.auto_send_dir),
+            "auto_download_done": len(self._auto_download_done),
+            "auto_download_pending": len(self._auto_download_next_try),
+        }
 
     def chat_history_payload(self, limit: int = 30) -> list[dict]:
         if limit <= 0:
@@ -140,6 +165,122 @@ class ArchipelRuntime:
             return f"[AI] {exc}"
         self._record_chat("assistant", answer)
         return f"[AI] {answer}"
+
+    def _trusted_peers(self) -> list[Peer]:
+        out: list[Peer] = []
+        for item in self.table.to_list():
+            node_id = str(item.get("node_id", ""))
+            peer = self.table.get(node_id)
+            if peer is not None and self.trust.is_trusted(peer.node_id):
+                out.append(peer)
+        return out
+
+    def _auto_trust_loop(self) -> None:
+        while not self._bg_stop.is_set():
+            try:
+                for item in self.table.to_list():
+                    node_id = str(item.get("node_id", ""))
+                    if not node_id or self.trust.is_trusted(node_id):
+                        continue
+                    self.trust.trust(node_id)
+                    self.log(f"[AUTO] Trust automatique: {node_id[:12]}...")
+            except Exception as exc:
+                self.log(f"[AUTO] Erreur auto-trust: {exc}")
+            self._bg_stop.wait(2)
+
+    def _auto_download_loop(self) -> None:
+        while not self._bg_stop.is_set():
+            now = time.time()
+            try:
+                for item in self.transfer.list_manifests():
+                    file_id = str(item.get("file_id", ""))
+                    if not file_id or file_id in self._auto_download_done:
+                        continue
+
+                    retry_at = self._auto_download_next_try.get(file_id, 0.0)
+                    if now < retry_at:
+                        continue
+
+                    manifest = self.transfer.load_manifest(file_id)
+                    if not manifest:
+                        continue
+
+                    nb_chunks = int(manifest.get("nb_chunks", 0))
+                    if nb_chunks > 0 and all(self.transfer.has_chunk(file_id, i) for i in range(nb_chunks)):
+                        self._auto_download_done.add(file_id)
+                        continue
+
+                    selector = str(item.get("source_node_id") or item.get("sender_node_id") or "")
+                    peer = self.table.resolve(selector) if selector else None
+                    if peer is None:
+                        self._auto_download_next_try[file_id] = now + 5
+                        continue
+                    if not self.trust.is_trusted(peer.node_id):
+                        self._auto_download_next_try[file_id] = now + 5
+                        continue
+
+                    self.log(f"[AUTO] Download automatique file_id={file_id[:12]}... source={peer.node_id[:12]}...")
+                    result = self._run_download(file_id, peer.node_id, "")
+                    if result.startswith("[DOWNLOAD] Fichier reconstruit") or result.startswith("[DOWNLOAD] Fichier déjà complet"):
+                        self._auto_download_done.add(file_id)
+                        self._auto_download_next_try.pop(file_id, None)
+                        self.log(result)
+                    else:
+                        self._auto_download_next_try[file_id] = time.time() + 8
+                        self.log(result)
+            except Exception as exc:
+                self.log(f"[AUTO] Erreur auto-download: {exc}")
+            self._bg_stop.wait(2)
+
+    def _auto_send_loop(self) -> None:
+        while not self._bg_stop.is_set():
+            try:
+                peers = self._trusted_peers()
+                if not peers:
+                    self._bg_stop.wait(2)
+                    continue
+
+                for path in sorted(self.auto_send_dir.glob("*")):
+                    if not path.is_file():
+                        continue
+                    try:
+                        st = path.stat()
+                        stamp = f"{path.resolve()}::{st.st_size}::{st.st_mtime_ns}"
+                    except OSError:
+                        continue
+                    if stamp in self._auto_send_seen:
+                        continue
+
+                    manifest = self.transfer.create_manifest_and_chunks(
+                        str(path),
+                        sender_node_id=self.identity.public_key_raw.hex(),
+                    )
+                    manifest = sign_manifest(manifest, self.identity)
+                    self.transfer.save_manifest(manifest)
+
+                    sent = 0
+                    for peer in peers:
+                        try:
+                            self.tcp.send_manifest(peer, manifest)
+                            sent += 1
+                        except Exception as exc:
+                            self.log(f"[AUTO] Echec envoi manifest vers {peer.node_id[:12]}...: {exc}")
+
+                    if sent > 0:
+                        self._auto_send_seen.add(stamp)
+                        self.log(
+                            f"[AUTO] Partage automatique {path.name} file_id={manifest['file_id'][:12]}... peers={sent}"
+                        )
+            except Exception as exc:
+                self.log(f"[AUTO] Erreur auto-send: {exc}")
+            self._bg_stop.wait(2)
+
+    @staticmethod
+    def _strip_wrapping_quotes(value: str) -> str:
+        out = value.strip()
+        while len(out) >= 2 and out[0] == out[-1] and out[0] in {'"', "'"}:
+            out = out[1:-1].strip()
+        return out
 
     def _candidate_download_peers(self, selector: str, file_id: str) -> list[Peer]:
         if selector:
@@ -268,19 +409,47 @@ class ArchipelRuntime:
         return f"[DOWNLOAD] Fichier reconstruit: {out}"
 
     def run_command(self, raw: str) -> str:
+        raw = raw.strip()
+        if not raw:
+            return ""
+
+        cmd_hint = raw.split(maxsplit=1)[0].lower()
+
+        if cmd_hint == "send":
+            parts = raw.split(maxsplit=2)
+            if len(parts) < 3:
+                return "[CLI] Usage: send <node_id/prefix> <filepath>"
+            selector = self._strip_wrapping_quotes(parts[1])
+            filepath = self._strip_wrapping_quotes(parts[2])
+            peer = self.table.resolve(selector)
+            if peer is None:
+                return "[CLI] Pair introuvable (exact ou préfixe unique requis)"
+            self._ensure_trusted_or_raise(peer, "send")
+            manifest = self.transfer.create_manifest_and_chunks(filepath, sender_node_id=self.identity.public_key_raw.hex())
+            manifest = sign_manifest(manifest, self.identity)
+            self.transfer.save_manifest(manifest)
+            self.tcp.send_manifest(peer, manifest)
+            return f"[TRANSFER] Manifest signé file_id={manifest['file_id']} chunks={manifest['nb_chunks']}"
+
+        if cmd_hint == "download":
+            parts = raw.split(maxsplit=3)
+            if len(parts) < 2:
+                return "[CLI] Usage: download <file_id> [node_id/prefix] [output_path]"
+            file_id = self._strip_wrapping_quotes(parts[1])
+            selector = self._strip_wrapping_quotes(parts[2]) if len(parts) >= 3 else ""
+            output_path = self._strip_wrapping_quotes(parts[3]) if len(parts) >= 4 else ""
+            return self._run_download(file_id, selector, output_path)
+
         try:
             tokens = shlex.split(raw)
         except ValueError as exc:
             return f"[CLI] Ligne invalide: {exc}"
 
-        if not tokens:
-            return ""
-
         cmd = tokens[0].lower()
 
         if cmd == "help":
             return (
-                "whoami | ai-status | chat-history | ask </question> | add-peer <node_id> <ip> <port> "
+                "whoami | ai-status | auto-status | chat-history | ask </question> | add-peer <node_id> <ip> <port> "
                 "[ed25519_pub_b64] | peers | trusted | trust <node> | untrust <node> | files/receive | status | "
                 "msg <node> <texte> | msg @archipel-ai <question> | send <node> <filepath> | "
                 "download <file_id> [node] [output] | quit"
@@ -322,6 +491,9 @@ class ArchipelRuntime:
 
         if cmd == "ai-status":
             return json.dumps(self.ai_status_payload(), indent=2)
+
+        if cmd == "auto-status":
+            return json.dumps(self.auto_status_payload(), indent=2)
 
         if cmd == "chat-history":
             return json.dumps(self.chat_history_payload(limit=30), indent=2)
@@ -378,28 +550,6 @@ class ArchipelRuntime:
             self.tcp.send_secure_message(peer, text)
             self._record_chat("me", text, peer_node_id=peer.node_id)
             return ""
-
-        if cmd == "send":
-            if len(tokens) < 3:
-                return "[CLI] Usage: send <node_id/prefix> <filepath>"
-            peer = self.table.resolve(tokens[1])
-            if peer is None:
-                return "[CLI] Pair introuvable (exact ou préfixe unique requis)"
-            self._ensure_trusted_or_raise(peer, "send")
-            filepath = " ".join(tokens[2:])
-            manifest = self.transfer.create_manifest_and_chunks(filepath, sender_node_id=self.identity.public_key_raw.hex())
-            manifest = sign_manifest(manifest, self.identity)
-            self.transfer.save_manifest(manifest)
-            self.tcp.send_manifest(peer, manifest)
-            return f"[TRANSFER] Manifest signé file_id={manifest['file_id']} chunks={manifest['nb_chunks']}"
-
-        if cmd == "download":
-            if len(tokens) < 2:
-                return "[CLI] Usage: download <file_id> [node_id/prefix] [output_path]"
-            file_id = tokens[1]
-            selector = tokens[2] if len(tokens) >= 3 else ""
-            output_path = tokens[3] if len(tokens) >= 4 else ""
-            return self._run_download(file_id, selector, output_path)
 
         if cmd in {"quit", "exit"}:
             return "__QUIT__"
