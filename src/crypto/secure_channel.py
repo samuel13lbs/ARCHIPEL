@@ -9,24 +9,33 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from network.packet_v1 import (
+    CONTROL_HMAC_KEY,
+    PT_HS1,
+    PT_HS2,
+    PT_HS3,
+    PT_MSG_SECURE,
+    decode_tlvs,
+    encode_tlvs,
+    read_packet,
+    write_packet,
+)
 
-from .identity import Identity, b64d, b64e, node_id_from_pubkey, verify_signature
+from .identity import Identity, b64e, node_id_matches_pubkey, verify_signature
+
+TLV_HS_ED25519_PUB = 0x01
+TLV_HS_EPH_PUB = 0x02
+TLV_HS_TIMESTAMP = 0x03
+TLV_HS_SIGNATURE = 0x04
+
+TLV_SEQ = 0x01
+TLV_TS = 0x02
+TLV_NONCE = 0x03
+TLV_CIPHERTEXT = 0x04
 
 
 def canonical_bytes(obj: dict[str, Any]) -> bytes:
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def read_json_line(reader) -> Optional[dict[str, Any]]:
-    line = reader.readline()
-    if not line:
-        return None
-    return json.loads(line.decode("utf-8"))
-
-
-def write_json_line(writer, payload: dict[str, Any]) -> None:
-    writer.write((json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8"))
-    writer.flush()
 
 
 def derive_session_key(shared_secret: bytes) -> bytes:
@@ -42,150 +51,201 @@ class Session:
     rx_max_seq: int = -1
 
 
-def _encrypt_bytes(session: Session, plaintext: bytes) -> dict[str, Any]:
+def _tlv_first(payload: bytes, t: int) -> bytes:
+    for kind, value in decode_tlvs(payload):
+        if kind == t:
+            return value
+    raise ValueError(f"TLV manquant: {t}")
+
+
+def _encode_secure_record(session: Session, payload: dict[str, Any]) -> bytes:
+    plaintext = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     nonce = os.urandom(12)
+
+    seq = session.tx_seq
+    ts = int(time.time() * 1000)
+    seq_b = seq.to_bytes(8, "big")
+    ts_b = ts.to_bytes(8, "big")
+
     aesgcm = AESGCM(session.key)
-    aad = f"{session.tx_seq}".encode("utf-8")
-    ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
-    pkt = {
-        "type": "MSG_ENC",
-        "seq": session.tx_seq,
-        "ts": int(time.time() * 1000),
-        "nonce": b64e(nonce),
-        "ciphertext": b64e(ciphertext),
-    }
+    ciphertext = aesgcm.encrypt(nonce, plaintext, seq_b)
     session.tx_seq += 1
-    return pkt
+
+    return encode_tlvs(
+        [
+            (TLV_SEQ, seq_b),
+            (TLV_TS, ts_b),
+            (TLV_NONCE, nonce),
+            (TLV_CIPHERTEXT, ciphertext),
+        ]
+    )
 
 
-def _decrypt_bytes(session: Session, msg: dict[str, Any], replay_window: int = 1024) -> bytes:
-    seq = int(msg.get("seq", -1))
-    if seq < 0:
-        raise ValueError("seq manquant")
+def _decode_secure_record(session: Session, record: bytes, replay_window: int = 1024) -> dict[str, Any]:
+    seq_b = _tlv_first(record, TLV_SEQ)
+    nonce = _tlv_first(record, TLV_NONCE)
+    ciphertext = _tlv_first(record, TLV_CIPHERTEXT)
+
+    if len(seq_b) != 8:
+        raise ValueError("seq invalide")
+    if len(nonce) != 12:
+        raise ValueError("nonce invalide")
+
+    seq = int.from_bytes(seq_b, "big")
     if seq <= session.rx_max_seq - replay_window:
         raise ValueError("replay détecté")
 
-    nonce = b64d(str(msg["nonce"]))
-    ciphertext = b64d(str(msg["ciphertext"]))
-    aad = f"{seq}".encode("utf-8")
-
     aesgcm = AESGCM(session.key)
-    plaintext = aesgcm.decrypt(nonce, ciphertext, aad)
+    plaintext = aesgcm.decrypt(nonce, ciphertext, seq_b)
 
     if seq > session.rx_max_seq:
         session.rx_max_seq = seq
-    return plaintext
+
+    return json.loads(plaintext.decode("utf-8"))
 
 
-def encrypt_payload(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
-    return _encrypt_bytes(session, json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+def send_secure_payload(stream, session: Session, local_node_id: str, payload: dict[str, Any]) -> None:
+    record = _encode_secure_record(session, payload)
+    write_packet(stream, PT_MSG_SECURE, local_node_id, record, session.key)
 
 
-def decrypt_payload(session: Session, msg: dict[str, Any]) -> dict[str, Any]:
-    raw = _decrypt_bytes(session, msg)
-    return json.loads(raw.decode("utf-8"))
-
-
-def encrypt_message(session: Session, plaintext: str) -> dict[str, Any]:
-    return encrypt_payload(session, {"kind": "CHAT", "text": plaintext})
-
-
-def decrypt_message(session: Session, msg: dict[str, Any], replay_window: int = 1024) -> str:
-    payload = decrypt_payload(session, msg)
-    if payload.get("kind") != "CHAT":
-        raise ValueError("payload non-CHAT")
-    return str(payload.get("text", ""))
+def recv_secure_payload(stream, session: Session) -> Optional[dict[str, Any]]:
+    pkt = read_packet(stream, session.key)
+    if pkt is None:
+        return None
+    if pkt["type"] != PT_MSG_SECURE:
+        raise ValueError("type paquet sécurisé invalide")
+    if pkt["node_id"] != session.remote_node_id:
+        raise ValueError("node_id paquet sécurisé inattendu")
+    return _decode_secure_record(session, pkt["payload"])
 
 
 def initiator_handshake(conn, identity: Identity) -> tuple[Session, Any]:
-    reader = conn.makefile("rwb")
+    stream = conn.makefile("rwb")
+
     e_priv = x25519.X25519PrivateKey.generate()
     e_pub = e_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ts1 = int(time.time() * 1000)
 
-    hs1 = {
-        "type": "HS1",
-        "node_id": identity.node_id,
-        "ed25519_pub": identity.public_key_b64,
-        "e_pub": b64e(e_pub),
-        "ts": int(time.time() * 1000),
-    }
-    write_json_line(reader, hs1)
+    hs1_payload = encode_tlvs(
+        [
+            (TLV_HS_ED25519_PUB, identity.public_key_raw),
+            (TLV_HS_EPH_PUB, e_pub),
+            (TLV_HS_TIMESTAMP, ts1.to_bytes(8, "big")),
+        ]
+    )
+    write_packet(stream, PT_HS1, identity.node_id, hs1_payload, CONTROL_HMAC_KEY)
 
-    hs2 = read_json_line(reader)
-    if not hs2 or hs2.get("type") != "HS2":
+    hs2 = read_packet(stream, CONTROL_HMAC_KEY)
+    if hs2 is None or hs2["type"] != PT_HS2:
         raise ValueError("HS2 invalide")
 
-    remote_node_id = str(hs2.get("node_id", ""))
-    remote_pub = b64d(str(hs2.get("ed25519_pub", "")))
-    if node_id_from_pubkey(remote_pub) != remote_node_id:
+    remote_node_id = str(hs2["node_id"])
+    remote_pub = _tlv_first(hs2["payload"], TLV_HS_ED25519_PUB)
+    remote_e_pub_raw = _tlv_first(hs2["payload"], TLV_HS_EPH_PUB)
+    ts2_b = _tlv_first(hs2["payload"], TLV_HS_TIMESTAMP)
+    sig2 = _tlv_first(hs2["payload"], TLV_HS_SIGNATURE)
+
+    if not node_id_matches_pubkey(remote_node_id, remote_pub):
         raise ValueError("node_id distant invalide")
 
-    hs2_basic = {
+    hs1_view = {
+        "type": "HS1",
+        "node_id": identity.node_id,
+        "ed25519_pub": b64e(identity.public_key_raw),
+        "e_pub": b64e(e_pub),
+        "ts": ts1,
+    }
+    hs2_view = {
         "type": "HS2",
         "node_id": remote_node_id,
-        "ed25519_pub": hs2["ed25519_pub"],
-        "e_pub": hs2["e_pub"],
-        "ts": hs2["ts"],
+        "ed25519_pub": b64e(remote_pub),
+        "e_pub": b64e(remote_e_pub_raw),
+        "ts": int.from_bytes(ts2_b, "big"),
     }
+
     transcript_hash = hashes.Hash(hashes.SHA256())
-    transcript_hash.update(canonical_bytes(hs1))
-    transcript_hash.update(canonical_bytes(hs2_basic))
+    transcript_hash.update(canonical_bytes(hs1_view))
+    transcript_hash.update(canonical_bytes(hs2_view))
     th = transcript_hash.finalize()
 
-    if not verify_signature(remote_pub, b64d(str(hs2.get("sig", ""))), th):
+    if not verify_signature(remote_pub, sig2, th):
         raise ValueError("signature HS2 invalide")
 
-    remote_e_pub = x25519.X25519PublicKey.from_public_bytes(b64d(str(hs2["e_pub"])))
+    remote_e_pub = x25519.X25519PublicKey.from_public_bytes(remote_e_pub_raw)
     key = derive_session_key(e_priv.exchange(remote_e_pub))
 
-    hs3 = {
-        "type": "HS3",
-        "node_id": identity.node_id,
-        "sig": b64e(identity.sign(th)),
-        "ts": int(time.time() * 1000),
-    }
-    write_json_line(reader, hs3)
-    return Session(remote_node_id=remote_node_id, key=key), reader
+    ts3 = int(time.time() * 1000)
+    sig3 = identity.sign(th)
+    hs3_payload = encode_tlvs(
+        [
+            (TLV_HS_SIGNATURE, sig3),
+            (TLV_HS_TIMESTAMP, ts3.to_bytes(8, "big")),
+        ]
+    )
+    write_packet(stream, PT_HS3, identity.node_id, hs3_payload, CONTROL_HMAC_KEY)
+
+    return Session(remote_node_id=remote_node_id, key=key), stream
 
 
-def responder_handshake(reader, identity: Identity, hs1: dict[str, Any]) -> Session:
-    if hs1.get("type") != "HS1":
+def responder_handshake(stream, identity: Identity, hs1_packet: dict[str, Any]) -> Session:
+    if hs1_packet["type"] != PT_HS1:
         raise ValueError("HS1 invalide")
 
-    remote_node_id = str(hs1.get("node_id", ""))
-    remote_pub = b64d(str(hs1.get("ed25519_pub", "")))
-    if node_id_from_pubkey(remote_pub) != remote_node_id:
+    remote_node_id = str(hs1_packet["node_id"])
+    remote_pub = _tlv_first(hs1_packet["payload"], TLV_HS_ED25519_PUB)
+    remote_e_pub_raw = _tlv_first(hs1_packet["payload"], TLV_HS_EPH_PUB)
+    ts1_b = _tlv_first(hs1_packet["payload"], TLV_HS_TIMESTAMP)
+
+    if not node_id_matches_pubkey(remote_node_id, remote_pub):
         raise ValueError("node_id HS1 invalide")
 
     e_priv = x25519.X25519PrivateKey.generate()
     e_pub = e_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ts2 = int(time.time() * 1000)
 
-    hs2_basic = {
+    hs1_view = {
+        "type": "HS1",
+        "node_id": remote_node_id,
+        "ed25519_pub": b64e(remote_pub),
+        "e_pub": b64e(remote_e_pub_raw),
+        "ts": int.from_bytes(ts1_b, "big"),
+    }
+    hs2_view = {
         "type": "HS2",
         "node_id": identity.node_id,
-        "ed25519_pub": identity.public_key_b64,
+        "ed25519_pub": b64e(identity.public_key_raw),
         "e_pub": b64e(e_pub),
-        "ts": int(time.time() * 1000),
+        "ts": ts2,
     }
 
     transcript_hash = hashes.Hash(hashes.SHA256())
-    transcript_hash.update(canonical_bytes(hs1))
-    transcript_hash.update(canonical_bytes(hs2_basic))
+    transcript_hash.update(canonical_bytes(hs1_view))
+    transcript_hash.update(canonical_bytes(hs2_view))
     th = transcript_hash.finalize()
 
-    hs2 = dict(hs2_basic)
-    hs2["sig"] = b64e(identity.sign(th))
-    write_json_line(reader, hs2)
+    sig2 = identity.sign(th)
+    hs2_payload = encode_tlvs(
+        [
+            (TLV_HS_ED25519_PUB, identity.public_key_raw),
+            (TLV_HS_EPH_PUB, e_pub),
+            (TLV_HS_TIMESTAMP, ts2.to_bytes(8, "big")),
+            (TLV_HS_SIGNATURE, sig2),
+        ]
+    )
+    write_packet(stream, PT_HS2, identity.node_id, hs2_payload, CONTROL_HMAC_KEY)
 
-    hs3 = read_json_line(reader)
-    if not hs3 or hs3.get("type") != "HS3":
+    hs3 = read_packet(stream, CONTROL_HMAC_KEY)
+    if hs3 is None or hs3["type"] != PT_HS3:
         raise ValueError("HS3 invalide")
-    if str(hs3.get("node_id", "")) != remote_node_id:
+    if str(hs3["node_id"]) != remote_node_id:
         raise ValueError("node_id HS3 invalide")
-    if not verify_signature(remote_pub, b64d(str(hs3.get("sig", ""))), th):
+
+    sig3 = _tlv_first(hs3["payload"], TLV_HS_SIGNATURE)
+    if not verify_signature(remote_pub, sig3, th):
         raise ValueError("signature HS3 invalide")
 
-    remote_e_pub = x25519.X25519PublicKey.from_public_bytes(b64d(str(hs1["e_pub"])))
+    remote_e_pub = x25519.X25519PublicKey.from_public_bytes(remote_e_pub_raw)
     key = derive_session_key(e_priv.exchange(remote_e_pub))
 
     return Session(remote_node_id=remote_node_id, key=key)

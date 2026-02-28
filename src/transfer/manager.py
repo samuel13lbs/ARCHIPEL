@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
+from transfer.manifest_security import manifest_sender_node_id
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -31,6 +33,25 @@ class TransferManager:
         ensure_dir(d)
         return d / f"{index:08d}.chk"
 
+    def available_chunk_indices(self, file_id: str) -> list[int]:
+        d = self.chunks_dir / file_id
+        if not d.exists():
+            return []
+        out: list[int] = []
+        for p in d.glob("*.chk"):
+            try:
+                out.append(int(p.stem))
+            except ValueError:
+                continue
+        out.sort()
+        return out
+
+    def save_manifest(self, manifest: dict[str, Any]) -> None:
+        file_id = str(manifest.get("file_id", ""))
+        if not file_id:
+            raise ValueError("manifest sans file_id")
+        self._manifest_path(file_id).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
     def create_manifest_and_chunks(self, file_path: str, sender_node_id: str, chunk_size: int = 524288) -> dict[str, Any]:
         p = Path(file_path)
         data = p.read_bytes()
@@ -56,7 +77,7 @@ class TransferManager:
             "chunks": chunks_meta,
             "sender_id": sender_node_id,
         }
-        self._manifest_path(file_id).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        self.save_manifest(manifest)
         return manifest
 
     def save_remote_manifest(self, manifest: dict[str, Any], source_node_id: str) -> None:
@@ -66,6 +87,10 @@ class TransferManager:
 
         saved = dict(manifest)
         saved["source_node_id"] = source_node_id
+        try:
+            saved["sender_node_id"] = manifest_sender_node_id(manifest)
+        except Exception:
+            saved["sender_node_id"] = ""
         self._manifest_path(file_id).write_text(json.dumps(saved, indent=2), encoding="utf-8")
 
     def load_manifest(self, file_id: str) -> Optional[dict[str, Any]]:
@@ -86,7 +111,8 @@ class TransferManager:
                         "size": m.get("size"),
                         "nb_chunks": m.get("nb_chunks"),
                         "sender_id": m.get("sender_id"),
-                        "source_node_id": m.get("source_node_id", m.get("sender_id")),
+                        "sender_node_id": m.get("sender_node_id", ""),
+                        "source_node_id": m.get("source_node_id", m.get("sender_node_id", "")),
                     }
                 )
             except Exception:

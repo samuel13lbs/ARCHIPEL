@@ -1,99 +1,133 @@
-﻿# Archipel - Sprint 4 (Python MVP)
+﻿# Archipel
 
-Protocole P2P local, chiffré et décentralisé, sans Internet ni serveur central.
+Protocole P2P local, chiffré et décentralisé, conçu pour fonctionner sans Internet et sans serveur central.
 
-## Architecture
+## Description du protocole implémenté
 
-- `src/network/`: découverte LAN (UDP multicast), TCP server/client, table de pairs
-- `src/crypto/`: identité Ed25519, handshake X25519+HKDF, canal AES-256-GCM
-- `src/transfer/`: manifest, chunking, stockage local, reconstruction
-- `src/security/`: TrustStore persistant (`trust.json`)
-- `src/cli/`: interface de démo
+Archipel est un nœud LAN autonome qui combine:
+- découverte pair-à-pair via UDP multicast,
+- sessions chiffrées E2E sur TCP,
+- paquets binaires `ARCP` v1 sur discovery, handshake et tunnel sécurisé (`MAGIC|TYPE|NODE_ID|PAYLOAD_LEN|HMAC`),
+- transfert de fichiers chunké avec vérification d'intégrité (hash chunk + signature Ed25519 des `CHUNK_DATA`),
+- trust manuel (`trust/untrust`) pour autoriser les opérations sensibles.
 
-## Primitives cryptographiques
+Le nœud expose une CLI interactive et une UI Web locale (offline, sans CDN).
 
-- Identité: `Ed25519`
-- Échange de clé session: `X25519`
-- Dérivation: `HKDF-SHA256`
-- Chiffrement payload: `AES-256-GCM`
-- Intégrité fichier/chunks: `SHA-256`
+## Schéma d'architecture
 
-## Réseau
+```text
+                 UDP Multicast (239.255.42.99:6000)
+     +----------------------------------------------------------+
+     |                       Discovery                          |
+     +----------------------------------------------------------+
+        | HELLO / PEER_LIST                     | HELLO / PEER_LIST
+        v                                       v
++-----------------------+               +-----------------------+
+| Node A                |   TCP         | Node B                |
+| - Ed25519 identity    |<------------->| - Ed25519 identity    |
+| - X25519 handshake    |   (HS1/HS2/HS3| - X25519 handshake    |
+| - AES-GCM + ARCP v1   |    + MSG_ENC) | - AES-GCM + ARCP v1   |
+| - chunk store         |               | - chunk store         |
++-----------------------+               +-----------------------+
+        |                                           |
+        +---- MANIFEST / CHUNK_REQ / CHUNK_DATA ---+
+```
 
-- Découverte: UDP multicast `239.255.42.99:6000`
-- Transport applicatif: TCP unicast (port configurable, défaut `7777`)
+## Choix techniques
 
-## Modèle de confiance (Sprint 4)
+- Langage: Python 3.12
+- Transport: UDP multicast + TCP unicast
+- Interface: CLI + Web locale (HTML/CSS/JS)
+- Stockage local: `.archipel/node-<port>/...`
 
-- TOFU + validation manuelle via commande `trust`
-- Les opérations sensibles (`msg`, `send`, `download`, `CHUNK_REQ`) exigent des pairs approuvés.
-- Les `MANIFEST` peuvent être reçus sans trust pour découverte de contenu.
+## Primitives cryptographiques et justification
 
-## Installation
+- `Ed25519`: identité des nœuds + signatures (rapide, standard moderne)
+- `X25519`: échange de clés éphémères par session (forward secrecy)
+- `HKDF-SHA256`: dérivation de clé session
+- `AES-256-GCM`: chiffrement authentifié des payloads
+- `SHA-256`: intégrité chunks/fichiers + digest de manifest
+
+## Installation (reproductible)
 
 ```powershell
 cd c:\Users\USER\OneDrive\Documents\ARCHIPEL
 python -m pip install --user cryptography
 ```
 
-## Démarrage
+## Lancement CLI
 
 ```powershell
 $env:PYTHONPATH="src"
 python -m cli.archipel start --port 7777
 ```
 
-## Lancement auto 3 nœuds (Windows)
+## Lancement Web UI (offline)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\demo\launch_3_nodes.ps1
+$env:PYTHONPATH="src"
+python -m web.server --node-port 7777 --web-port 8080
 ```
 
-Options:
+Ouvrir ensuite `http://127.0.0.1:8080`.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\demo\launch_3_nodes.ps1 -PortA 7777 -PortB 7778 -PortC 7779 -StateDir .archipel
-powershell -ExecutionPolicy Bypass -File .\demo\launch_3_nodes.ps1 -DryRun
-```
+## Commandes disponibles (CLI/Web)
 
-## Commandes CLI
-
+- `help`
+- `whoami`
+- `add-peer <node_id> <ip> <port> [ed25519_pub_b64]`
 - `peers`
 - `trusted`
 - `trust <node_id|prefix>`
 - `untrust <node_id|prefix>`
-- `files`
-- `status`
 - `msg <node_id|prefix> <texte>`
 - `send <node_id|prefix> <filepath>`
+- `receive` (alias de `files`)
+- `files`
 - `download <file_id> [node_id|prefix] [output_path]`
-- `quit`
+- `status`
 
-## Démo jury (< 5 min)
+## Guide démo (3 cas d'usage)
 
-1. Ouvrir 3 terminaux et démarrer les nœuds ports `7777`, `7778`, `7779`.
-2. Sur A et B: `peers`, puis `trust` mutuel.
-3. Sur A: `msg <prefix_B> "Hello secure"`.
-4. Sur A: `send <prefix_B> <fichier_50MB>`.
-5. Sur B: `files`, récupérer `file_id`.
-6. Sur B: `download <file_id> <prefix_A>`.
-7. Vérifier log `Fichier reconstruit` et `status`.
+1. Démarrer 2 ou 3 nœuds (`7777`, `7778`, `7779`).
+2. Cas 1, découverte/trust:
+   - `peers`
+   - `trust <prefix>`
+3. Cas 2, message chiffré:
+   - `msg <prefix> "Hello secure"`
+4. Cas 3, fichier chunké:
+   - `send <prefix> <fichier>`
+   - côté receveur: `receive` puis `download <file_id> <prefix_source>`
 
-Scripts de support: `demo/demo_sprint4.ps1`, `demo/launch_3_nodes.ps1`.
+Scripts de démo:
+- `demo/launch_3_nodes.ps1`
+- `demo/demo_sprint4.ps1`
 
-## Stockage local
+## Variables d'environnement
 
-Sous `.archipel/node-<port>/`:
+Voir `.env.example` pour les valeurs usuelles (ports, state dir).
+`ARCHIPEL_CONTROL_HMAC_KEY` (hex 32 bytes) permet de protéger les paquets de contrôle pré-session.
 
-- `ed25519.key`
-- `trust.json`
-- `transfer/manifests/*.json`
-- `transfer/chunks/<file_id>/*.chk`
-- `transfer/out/*`
+## Limites connues
 
-## Limitations connues
+- Download multi-source implémenté (3 workers) avec rarest-first heuristique; optimisation réseau encore possible.
+- Keepalive actif implémenté sur sessions sécurisées; instrumentation avancée encore à faire.
+- Authentification pré-session des paquets de contrôle (HMAC statique locale) à durcir.
+- TOFU automatique non activé (validation via trust manuel uniquement).
+- Intégration Gemini non implémentée.
 
-- Download mono-source (pas de multi-source parallèle).
-- Pas de scheduling rarest-first.
-- Pas d’interface web (CLI only).
-- Trust manuel local (pas encore de Web-of-Trust distribué).
+## Pistes d'amélioration
+
+- Optimisations scheduler (pondération latence/bande passante, priorisation dynamique).
+- Métriques de session (RTT, taux retry, débit par pair).
+- Réputation des pairs + shared_files dans la peer table (alignement complet cahier).
+- Réplication passive configurable des chunks.
+- Module IA optionnel (`--no-ai`) conforme cahier.
+
+## Membres et contributions
+
+- `Membre 1` : réseau P2P / discovery
+- `Membre 2` : crypto / handshake / trust
+- `Membre 3` : chunking / transfert / QA
+
+(Remplacer par les noms réels de l'équipe.)

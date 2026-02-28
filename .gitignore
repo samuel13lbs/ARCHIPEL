@@ -10,6 +10,7 @@ venv/
 
 # Local node/runtime state
 .archipel/
+.archipel-*/
 .archipel-test/
 .archipel-test-s3/
 .archipel-test-s4/
@@ -22,3 +23,4 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+.env

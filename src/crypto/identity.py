@@ -16,7 +16,17 @@ def b64d(data: str) -> bytes:
 
 
 def node_id_from_pubkey(pubkey_raw: bytes) -> str:
+    # node_id v1: Ed25519 public key (32 bytes) encoded as hex.
+    return pubkey_raw.hex()
+
+
+def legacy_node_id_from_pubkey(pubkey_raw: bytes) -> str:
+    # Legacy compatibility for previously generated identities.
     return hashlib.sha256(pubkey_raw).hexdigest()
+
+
+def node_id_matches_pubkey(node_id: str, pubkey_raw: bytes) -> bool:
+    return node_id in {node_id_from_pubkey(pubkey_raw), legacy_node_id_from_pubkey(pubkey_raw)}
 
 
 @dataclass

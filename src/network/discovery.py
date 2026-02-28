@@ -1,15 +1,31 @@
-﻿import json
+﻿import base64
+import json
 import socket
+import struct
 import threading
 import time
 from typing import Callable
 
-from crypto.identity import b64d, node_id_from_pubkey
+from crypto.identity import node_id_matches_pubkey
+from network.packet_v1 import (
+    CONTROL_HMAC_KEY,
+    PT_HELLO,
+    PT_PEER_LIST,
+    decode_tlvs,
+    encode_tlvs,
+    pack_packet,
+    unpack_packet,
+)
 
 from .peer_table import PeerTable
 
 MULTICAST_GROUP = "239.255.42.99"
 MULTICAST_PORT = 6000
+
+TLV_HELLO_TCP_PORT = 0x01
+TLV_HELLO_ED25519_PUB = 0x02
+TLV_HELLO_TS = 0x03
+TLV_PEER_LIST_JSON = 0x01
 
 
 class DiscoveryService:
@@ -53,14 +69,19 @@ class DiscoveryService:
         self._send_sock.close()
 
     def _hello_packet(self) -> bytes:
-        pkt = {
-            "type": "HELLO",
-            "node_id": self.node_id,
-            "ed25519_pub": self.ed25519_pub,
-            "tcp_port": self.tcp_port,
-            "timestamp": int(time.time() * 1000),
-        }
-        return json.dumps(pkt, separators=(",", ":")).encode("utf-8")
+        try:
+            pub_raw = base64.b64decode(self.ed25519_pub.encode("ascii"))
+        except Exception:
+            pub_raw = b""
+
+        payload = encode_tlvs(
+            [
+                (TLV_HELLO_TCP_PORT, struct.pack(">I", self.tcp_port)),
+                (TLV_HELLO_ED25519_PUB, pub_raw),
+                (TLV_HELLO_TS, int(time.time() * 1000).to_bytes(8, "big")),
+            ]
+        )
+        return pack_packet(PT_HELLO, self.node_id, payload, CONTROL_HMAC_KEY)
 
     def _hello_loop(self) -> None:
         while not self._stop.is_set():
@@ -74,7 +95,7 @@ class DiscoveryService:
     def _recv_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                raw, addr = self._recv_sock.recvfrom(4096)
+                raw, addr = self._recv_sock.recvfrom(65535)
             except socket.timeout:
                 continue
             except OSError:
@@ -82,39 +103,38 @@ class DiscoveryService:
 
             ip, _ = addr
             try:
-                msg = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
+                pkt = unpack_packet(raw, CONTROL_HMAC_KEY)
+            except Exception:
                 continue
 
-            if msg.get("type") != "HELLO":
+            if pkt.get("type") != PT_HELLO:
                 continue
 
-            node_id = str(msg.get("node_id", ""))
-            ed25519_pub = str(msg.get("ed25519_pub", ""))
-            tcp_port = int(msg.get("tcp_port", 0))
-            if not node_id or tcp_port <= 0 or not ed25519_pub:
+            try:
+                data = {t: v for t, v in decode_tlvs(pkt["payload"])}
+                node_id = str(pkt["node_id"])
+                ed25519_pub_raw = data[TLV_HELLO_ED25519_PUB]
+                tcp_port = struct.unpack(">I", data[TLV_HELLO_TCP_PORT])[0]
+            except Exception:
+                continue
+
+            if not node_id or tcp_port <= 0 or not ed25519_pub_raw:
                 continue
             if node_id == self.node_id:
                 continue
 
-            try:
-                if node_id_from_pubkey(b64d(ed25519_pub)) != node_id:
-                    continue
-            except Exception:
+            if not node_id_matches_pubkey(node_id, ed25519_pub_raw):
                 continue
 
-            self.peer_table.upsert(node_id=node_id, ip=ip, tcp_port=tcp_port, ed25519_pub=ed25519_pub)
+            ed25519_pub_b64 = base64.b64encode(ed25519_pub_raw).decode("ascii")
+            self.peer_table.upsert(node_id=node_id, ip=ip, tcp_port=tcp_port, ed25519_pub=ed25519_pub_b64)
             self.log(f"[DISCOVERY] HELLO reçu de {node_id[:12]}... {ip}:{tcp_port}")
             self._send_peer_list(ip, tcp_port)
 
     def _send_peer_list(self, dest_ip: str, dest_port: int) -> None:
-        payload = {
-            "type": "PEER_LIST",
-            "from": self.node_id,
-            "peers": self.peer_table.to_list(),
-            "timestamp": int(time.time() * 1000),
-        }
-        data = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+        peers_json = json.dumps(self.peer_table.to_list(), separators=(",", ":")).encode("utf-8")
+        payload = encode_tlvs([(TLV_PEER_LIST_JSON, peers_json)])
+        data = pack_packet(PT_PEER_LIST, self.node_id, payload, CONTROL_HMAC_KEY)
         try:
             with socket.create_connection((dest_ip, dest_port), timeout=2.0) as conn:
                 conn.sendall(data)

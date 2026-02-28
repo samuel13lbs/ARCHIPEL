@@ -1,21 +1,24 @@
-﻿import socket
+﻿import json
+import socket
 import threading
 import time
 from typing import Callable, Optional
 
-from crypto.identity import Identity, b64d, node_id_from_pubkey
+from crypto.identity import Identity, b64d, node_id_matches_pubkey
 from crypto.secure_channel import (
-    decrypt_payload,
-    encrypt_message,
-    encrypt_payload,
     initiator_handshake,
-    read_json_line,
+    recv_secure_payload,
     responder_handshake,
-    write_json_line,
+    send_secure_payload,
 )
+from network.packet_v1 import CONTROL_HMAC_KEY, PT_HS1, PT_PEER_LIST, decode_tlvs, read_packet
+from transfer.chunk_security import sign_chunk_payload
+from transfer.manifest_security import manifest_sender_node_id, verify_manifest_signature
 from transfer.manager import TransferManager
 
 from .peer_table import Peer, PeerTable
+
+TLV_PEER_LIST_JSON = 0x01
 
 
 class TcpServer:
@@ -52,14 +55,14 @@ class TcpServer:
         with socket.create_connection((peer.ip, peer.tcp_port), timeout=5.0) as conn:
             conn.settimeout(10)
             session, stream = initiator_handshake(conn, self.identity)
-            write_json_line(stream, encrypt_message(session, plaintext))
+            send_secure_payload(stream, session, self.identity.node_id, {"kind": "CHAT", "text": plaintext})
         self.log(f"[MSG] Message chiffré envoyé à {peer.node_id[:12]}... ({peer.ip}:{peer.tcp_port})")
 
     def send_manifest(self, peer: Peer, manifest: dict) -> None:
         with socket.create_connection((peer.ip, peer.tcp_port), timeout=5.0) as conn:
             conn.settimeout(20)
             session, stream = initiator_handshake(conn, self.identity)
-            write_json_line(stream, encrypt_payload(session, manifest))
+            send_secure_payload(stream, session, self.identity.node_id, manifest)
         self.log(f"[TRANSFER] MANIFEST envoyé à {peer.node_id[:12]}... ({manifest.get('file_id')})")
 
     def request_chunk(self, peer: Peer, file_id: str, index: int) -> Optional[dict]:
@@ -67,14 +70,31 @@ class TcpServer:
             conn.settimeout(20)
             session, stream = initiator_handshake(conn, self.identity)
             req = {"kind": "CHUNK_REQ", "file_id": file_id, "index": index}
-            write_json_line(stream, encrypt_payload(session, req))
-            reply = read_json_line(stream)
-            if reply is None or str(reply.get("type", "")) != "MSG_ENC":
-                return None
-            payload = decrypt_payload(session, reply)
-            if payload.get("kind") != "CHUNK_DATA":
+            send_secure_payload(stream, session, self.identity.node_id, req)
+            payload = recv_secure_payload(stream, session)
+            if payload is None or payload.get("kind") != "CHUNK_DATA":
                 return None
             return payload
+
+    def request_chunk_map(self, peer: Peer, file_id: str) -> Optional[set[int]]:
+        with socket.create_connection((peer.ip, peer.tcp_port), timeout=5.0) as conn:
+            conn.settimeout(20)
+            session, stream = initiator_handshake(conn, self.identity)
+            req = {"kind": "CHUNK_HAVE_REQ", "file_id": file_id}
+            send_secure_payload(stream, session, self.identity.node_id, req)
+            payload = recv_secure_payload(stream, session)
+            if payload is None or payload.get("kind") != "CHUNK_HAVE":
+                return None
+            indices = payload.get("indices", [])
+            if not isinstance(indices, list):
+                return None
+            out: set[int] = set()
+            for x in indices:
+                try:
+                    out.add(int(x))
+                except Exception:
+                    continue
+            return out
 
     def _accept_loop(self) -> None:
         self.log(f"[TCP] Écoute sur 0.0.0.0:{self.listen_port}")
@@ -89,30 +109,38 @@ class TcpServer:
 
     def _handle_conn(self, conn: socket.socket, addr: tuple[str, int]) -> None:
         ip, _ = addr
-        conn.settimeout(30)
+        conn.settimeout(1.0)
         self.log(f"[TCP] Connexion entrante {ip}")
         with conn:
             stream = conn.makefile("rwb")
             while not self._stop.is_set():
                 try:
-                    msg = read_json_line(stream)
+                    pkt = read_packet(stream, CONTROL_HMAC_KEY)
+                except TimeoutError:
+                    continue
                 except OSError:
                     break
-                if msg is None:
+                except Exception:
                     break
 
-                mtype = str(msg.get("type", ""))
-                if mtype == "PEER_LIST":
+                if pkt is None:
+                    break
+
+                ptype = int(pkt.get("type", -1))
+
+                if ptype == PT_PEER_LIST:
+                    try:
+                        tlv_map = {t: v for t, v in decode_tlvs(pkt["payload"])}
+                        peers_raw = tlv_map.get(TLV_PEER_LIST_JSON, b"[]")
+                        msg = {"peers": json.loads(peers_raw.decode("utf-8"))}
+                    except Exception:
+                        continue
                     self._handle_peer_list(ip, msg)
                     continue
 
-                if mtype == "PING":
-                    write_json_line(stream, {"type": "PONG", "timestamp": int(time.time() * 1000)})
-                    continue
-
-                if mtype == "HS1":
+                if ptype == PT_HS1:
                     try:
-                        session = responder_handshake(stream, self.identity, msg)
+                        session = responder_handshake(stream, self.identity, pkt)
                         trust = "trusted" if self.is_trusted(session.remote_node_id) else "untrusted"
                         self.log(f"[HS] Session sécurisée établie avec {session.remote_node_id[:12]}... ({trust})")
                         self._secure_message_loop(stream, session)
@@ -122,18 +150,35 @@ class TcpServer:
                         self.log(f"[HS] Erreur handshake entrant: {exc}")
                     break
 
-                self.log(f"[TCP] Message reçu ({mtype}) depuis {ip}")
+                self.log(f"[TCP] Packet contrôle inconnu type=0x{ptype:02x} depuis {ip}")
 
     def _secure_message_loop(self, stream, session) -> None:
+        last_seen = time.time()
+        last_ping = 0.0
         while not self._stop.is_set():
             try:
-                msg = read_json_line(stream)
+                payload = recv_secure_payload(stream, session)
+            except TimeoutError:
+                now = time.time()
+                if now - last_seen > 45:
+                    self.log(f"[TCP] Session expirée (idle timeout) {session.remote_node_id[:12]}...")
+                    return
+                if now - last_ping >= 15:
+                    ping = {"kind": "PING", "ts": int(now * 1000)}
+                    send_secure_payload(stream, session, self.identity.node_id, ping)
+                    last_ping = now
+                continue
             except OSError:
                 return
-            if msg is None or str(msg.get("type", "")) != "MSG_ENC":
+            except Exception as exc:
+                self.log(f"[SECURE] Erreur paquet: {exc}")
                 return
+
+            if payload is None:
+                return
+
             try:
-                payload = decrypt_payload(session, msg)
+                last_seen = time.time()
                 kind = str(payload.get("kind", ""))
                 remote_trusted = self.is_trusted(session.remote_node_id)
 
@@ -142,31 +187,66 @@ class TcpServer:
                         self.log(f"[TRUST] CHAT refusé depuis pair non approuvé {session.remote_node_id[:12]}...")
                         continue
                     self.log(f"[MSG] {session.remote_node_id[:12]}... -> {payload.get('text', '')}")
-                    write_json_line(stream, {"type": "ACK", "seq": msg.get("seq"), "ts": int(time.time() * 1000)})
+                    ack = {"kind": "ACK", "ts": int(time.time() * 1000)}
+                    send_secure_payload(stream, session, self.identity.node_id, ack)
                     continue
 
                 if kind == "MANIFEST":
-                    self.transfer.save_remote_manifest(payload, source_node_id=session.remote_node_id)
+                    if not verify_manifest_signature(payload):
+                        self.log(f"[TRANSFER] MANIFEST rejetée (signature invalide) from={session.remote_node_id[:12]}...")
+                        continue
+                    try:
+                        sender_node_id = manifest_sender_node_id(payload)
+                    except Exception:
+                        self.log(f"[TRANSFER] MANIFEST rejetée (sender_id invalide) from={session.remote_node_id[:12]}...")
+                        continue
+                    if sender_node_id != session.remote_node_id:
+                        self.log(f"[TRANSFER] MANIFEST rejetée (sender mismatch) from={session.remote_node_id[:12]}...")
+                        continue
+
+                    saved = dict(payload)
+                    saved["sender_node_id"] = sender_node_id
+                    self.transfer.save_remote_manifest(saved, source_node_id=session.remote_node_id)
                     self.log(f"[TRANSFER] MANIFEST reçue file_id={payload.get('file_id')} from={session.remote_node_id[:12]}...")
                     continue
 
                 if kind == "CHUNK_REQ":
                     if not remote_trusted:
                         err = {"kind": "ERROR", "code": "NOT_TRUSTED", "file_id": payload.get("file_id"), "index": payload.get("index")}
-                        write_json_line(stream, encrypt_payload(session, err))
+                        send_secure_payload(stream, session, self.identity.node_id, err)
                         continue
                     file_id = str(payload.get("file_id", ""))
                     index = int(payload.get("index", -1))
                     chunk_payload = self.transfer.build_chunk_data_payload(file_id, index)
                     if chunk_payload is None:
                         err = {"kind": "ERROR", "code": "CHUNK_NOT_FOUND", "file_id": file_id, "index": index}
-                        write_json_line(stream, encrypt_payload(session, err))
+                        send_secure_payload(stream, session, self.identity.node_id, err)
                     else:
-                        write_json_line(stream, encrypt_payload(session, chunk_payload))
+                        chunk_payload = sign_chunk_payload(chunk_payload, self.identity)
+                        send_secure_payload(stream, session, self.identity.node_id, chunk_payload)
+                    continue
+
+                if kind == "CHUNK_HAVE_REQ":
+                    if not remote_trusted:
+                        err = {"kind": "ERROR", "code": "NOT_TRUSTED", "file_id": payload.get("file_id")}
+                        send_secure_payload(stream, session, self.identity.node_id, err)
+                        continue
+                    file_id = str(payload.get("file_id", ""))
+                    indices = self.transfer.available_chunk_indices(file_id)
+                    reply = {"kind": "CHUNK_HAVE", "file_id": file_id, "indices": indices}
+                    send_secure_payload(stream, session, self.identity.node_id, reply)
                     continue
 
                 if kind == "ERROR":
                     self.log(f"[TRANSFER] Erreur distante: {payload}")
+                    continue
+
+                if kind == "PING":
+                    pong = {"kind": "PONG", "ts": int(time.time() * 1000)}
+                    send_secure_payload(stream, session, self.identity.node_id, pong)
+                    continue
+
+                if kind in {"PONG", "ACK"}:
                     continue
 
                 self.log(f"[SECURE] Payload inconnu: {kind}")
@@ -193,7 +273,7 @@ class TcpServer:
 
             if ed25519_pub:
                 try:
-                    if node_id_from_pubkey(b64d(ed25519_pub)) != node_id:
+                    if not node_id_matches_pubkey(node_id, b64d(ed25519_pub)):
                         continue
                 except Exception:
                     continue
