@@ -237,6 +237,11 @@ def build_html() -> str:
       font-weight: 700;
       color: #243a57;
     }
+    .mini-btn {
+      padding: 5px 8px;
+      font-size: 12px;
+      border-radius: 6px;
+    }
     .kpis {
       display: flex;
       flex-wrap: wrap;
@@ -352,8 +357,30 @@ def build_html() -> str:
     </div>
 
     <div style=\"margin-top:12px\">
-      <div class=\"label\">Manifests disponibles</div>
-      <div id=\"files\" class=\"box\" style=\"max-height:420px\"></div>
+      <div class=\"row\">
+        <div class=\"label\" style=\"margin-bottom:0\">Manifests disponibles</div>
+        <button id=\"copySelectedFileBtn\" class=\"btn-dark\" onclick=\"copySelectedFile()\" disabled>Copier file_id sélectionné</button>
+      </div>
+      <div class=\"row\" style=\"margin-top:8px\">
+        <select id=\"fileSelect\" onchange=\"onFileSelectChange()\"></select>
+        <button class=\"btn-dark\" onclick=\"copySelectedFile()\">Copier</button>
+      </div>
+      <div style=\"overflow:auto; margin-top:8px\">
+        <table>
+          <thead>
+            <tr>
+              <th>File ID</th>
+              <th>Nom</th>
+              <th>Chunks</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody id=\"filesRows\">
+            <tr><td colspan=\"4\" class=\"muted\">Chargement...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id=\"filesRaw\" class=\"box\" style=\"max-height:220px\"></div>
     </div>
   </section>
 
@@ -376,7 +403,14 @@ def build_html() -> str:
     </div>
 
     <div style=\"margin-top:12px\">
-      <div class=\"label\">Peers disponibles (avec ports)</div>
+      <div class=\"row\">
+        <div class=\"label\" style=\"margin-bottom:0\">Peers disponibles (avec ports)</div>
+        <button id=\"copySelectedPeerBtn\" class=\"btn-dark\" onclick=\"copySelectedPeer()\" disabled>Copier node_id sélectionné</button>
+      </div>
+      <div class=\"row\" style=\"margin-top:8px\">
+        <select id=\"peerSelect\" onchange=\"onPeerSelectChange()\"></select>
+        <button class=\"btn-dark\" onclick=\"copySelectedPeer()\">Copier</button>
+      </div>
       <div style=\"overflow:auto; margin-top:8px\">
         <table>
           <thead>
@@ -401,6 +435,8 @@ def build_html() -> str:
 let lastSeq = 0;
 let appState = null;
 let logsVisible = true;
+let selectedPeerNodeId = '';
+let selectedFileId = '';
 const pages = ['dashboard', 'messages', 'files', 'peers'];
 
 function getv(id) {
@@ -515,6 +551,77 @@ async function addPeerManual() {
   await runCmd('add-peer ' + node + ' ' + ip + ' ' + port);
 }
 
+async function copyText(text, okLabel) {
+  const value = String(text || '').trim();
+  if (!value) return;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    document.getElementById('cmdOut').textContent = '[UI] ' + (okLabel || 'Copié');
+  } catch (err) {
+    document.getElementById('cmdOut').textContent = '[UI] Copie impossible: ' + err;
+  }
+}
+
+async function copySelectedPeer() {
+  await copyText(selectedPeerNodeId, 'node_id copié');
+}
+
+async function copySelectedFile() {
+  await copyText(selectedFileId, 'file_id copié');
+}
+
+function selectPeer(nodeId) {
+  selectedPeerNodeId = String(nodeId || '').trim();
+  const btn = document.getElementById('copySelectedPeerBtn');
+  if (btn) btn.disabled = !selectedPeerNodeId;
+  const sel = document.getElementById('peerSelect');
+  if (sel && selectedPeerNodeId) {
+    sel.value = selectedPeerNodeId;
+  }
+  if (selectedPeerNodeId) {
+    document.getElementById('msgPeer').value = selectedPeerNodeId;
+    document.getElementById('sendPeer').value = selectedPeerNodeId;
+    document.getElementById('trustPeer').value = selectedPeerNodeId;
+  }
+}
+
+function selectFile(fileId) {
+  selectedFileId = String(fileId || '').trim();
+  const btn = document.getElementById('copySelectedFileBtn');
+  if (btn) btn.disabled = !selectedFileId;
+  const sel = document.getElementById('fileSelect');
+  if (sel && selectedFileId) {
+    sel.value = selectedFileId;
+  }
+  if (selectedFileId) {
+    document.getElementById('dlFileId').value = selectedFileId;
+  }
+}
+
+function onPeerSelectChange() {
+  const sel = document.getElementById('peerSelect');
+  if (!sel) return;
+  selectPeer(sel.value || '');
+}
+
+function onFileSelectChange() {
+  const sel = document.getElementById('fileSelect');
+  if (!sel) return;
+  selectFile(sel.value || '');
+}
+
 function formatTs(epochSecs) {
   const n = Number(epochSecs || 0);
   if (!n) return '';
@@ -524,9 +631,33 @@ function formatTs(epochSecs) {
 
 function renderPeers(peers) {
   const body = document.getElementById('peersRows');
+  const sel = document.getElementById('peerSelect');
   if (!Array.isArray(peers) || !peers.length) {
     body.innerHTML = '<tr><td colspan=\"5\" class=\"muted\">Aucun peer detecte</td></tr>';
+    if (sel) sel.innerHTML = '<option value=\"\">Aucun peer</option>';
+    selectedPeerNodeId = '';
+    const btn = document.getElementById('copySelectedPeerBtn');
+    if (btn) btn.disabled = true;
     return;
+  }
+  const exists = peers.some((p) => String(p.node_id || '') === selectedPeerNodeId);
+  if (!exists) {
+    selectedPeerNodeId = '';
+  }
+  const btn = document.getElementById('copySelectedPeerBtn');
+  if (btn) btn.disabled = !selectedPeerNodeId;
+  if (sel) {
+    const options = ['<option value=\"\">Choisir un peer</option>'].concat(
+      peers.map((p) => {
+        const raw = String(p.node_id || '');
+        const shortId = raw ? raw.slice(0, 14) + '...' : '';
+        const ip = String(p.ip || '');
+        const port = String(p.tcp_port || '');
+        const selected = raw === selectedPeerNodeId ? ' selected' : '';
+        return '<option value=\"' + esc(raw) + '\"' + selected + '>' + esc(shortId + ' ' + ip + ':' + port) + '</option>';
+      })
+    );
+    sel.innerHTML = options.join('');
   }
   body.innerHTML = peers.map((p) => {
     const node = esc(p.node_id || '');
@@ -549,7 +680,49 @@ function renderTrusted(trusted) {
 }
 
 function renderFiles(files) {
-  document.getElementById('files').textContent = JSON.stringify(files || [], null, 2);
+  const rows = document.getElementById('filesRows');
+  const sel = document.getElementById('fileSelect');
+  const raw = Array.isArray(files) ? files : [];
+  const btn = document.getElementById('copySelectedFileBtn');
+  document.getElementById('filesRaw').textContent = JSON.stringify(raw, null, 2);
+
+  if (!raw.length) {
+    rows.innerHTML = '<tr><td colspan=\"4\" class=\"muted\">Aucun manifest</td></tr>';
+    if (sel) sel.innerHTML = '<option value=\"\">Aucun file_id</option>';
+    selectedFileId = '';
+    if (btn) btn.disabled = true;
+    return;
+  }
+
+  const exists = raw.some((f) => String(f.file_id || '') === selectedFileId);
+  if (!exists) {
+    selectedFileId = '';
+  }
+  if (btn) btn.disabled = !selectedFileId;
+  if (sel) {
+    const options = ['<option value=\"\">Choisir un file_id</option>'].concat(
+      raw.map((f) => {
+        const rid = String(f.file_id || '');
+        const fname = String(f.filename || f.file_name || f.name || '');
+        const selected = rid === selectedFileId ? ' selected' : '';
+        return '<option value=\"' + esc(rid) + '\"' + selected + '>' + esc(rid.slice(0, 14) + '... ' + fname) + '</option>';
+      })
+    );
+    sel.innerHTML = options.join('');
+  }
+
+  rows.innerHTML = raw.map((f) => {
+    const fileId = esc(String(f.file_id || ''));
+    const filename = esc(f.filename || f.file_name || f.name || '');
+    const chunks = esc(f.nb_chunks || '');
+    const source = esc(f.source_node_id || f.sender_node_id || '');
+    return '<tr>' +
+      '<td>' + fileId + '</td>' +
+      '<td>' + filename + '</td>' +
+      '<td>' + chunks + '</td>' +
+      '<td>' + source + '</td>' +
+      '</tr>';
+  }).join('');
 }
 
 function renderChat(chat) {
