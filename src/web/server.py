@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import signal
 import threading
 import time
@@ -392,8 +393,15 @@ def main() -> int:
     parser.add_argument("--hello-interval", type=int, default=30)
     parser.add_argument("--state-dir", type=str, default=".archipel")
     parser.add_argument("--no-ai", action="store_true", help="Desactiver l'integration Gemini")
+    parser.add_argument("--no-tofu", action="store_true", help="Desactiver le trust TOFU automatique")
     parser.add_argument("--auto", action="store_true", help="Activer auto trust/download/share")
     parser.add_argument("--auto-send-dir", type=str, default="", help="Dossier auto-share (mode --auto)")
+    parser.add_argument(
+        "--replication-factor",
+        type=int,
+        default=max(1, int(os.getenv("ARCHIPEL_REPLICATION_FACTOR", "1"))),
+        help="Facteur de replication passive (mode --auto)",
+    )
     args = parser.parse_args()
 
     logs = LogBuffer()
@@ -409,8 +417,10 @@ def main() -> int:
         state_dir=args.state_dir,
         logger=logger,
         ai_enabled=not args.no_ai,
+        tofu_auto=not args.no_tofu,
         auto_mode=args.auto,
         auto_send_dir=args.auto_send_dir,
+        replication_factor=max(1, int(args.replication_factor)),
     )
     runtime.start()
 

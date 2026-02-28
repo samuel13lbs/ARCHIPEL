@@ -214,6 +214,9 @@ class TcpServer:
                     saved = dict(payload)
                     saved["sender_node_id"] = sender_node_id
                     self.transfer.save_remote_manifest(saved, source_node_id=session.remote_node_id)
+                    file_id = str(payload.get("file_id", ""))
+                    if file_id:
+                        self.peer_table.note_shared_file(session.remote_node_id, file_id)
                     self.log(f"[TRANSFER] MANIFEST reçue file_id={payload.get('file_id')} from={session.remote_node_id[:12]}...")
                     continue
 
@@ -272,6 +275,7 @@ class TcpServer:
                 ip = str(p.get("ip", src_ip))
                 tcp_port = int(p["tcp_port"])
                 ed25519_pub = str(p.get("ed25519_pub", ""))
+                shared_files = p.get("shared_files", [])
             except (KeyError, TypeError, ValueError):
                 continue
 
@@ -286,6 +290,9 @@ class TcpServer:
                     continue
 
             self.peer_table.upsert(node_id=node_id, ip=ip, tcp_port=tcp_port, ed25519_pub=ed25519_pub)
+            if isinstance(shared_files, list):
+                for fid in shared_files:
+                    self.peer_table.note_shared_file(node_id, str(fid))
             added += 1
 
         self.log(f"[TCP] PEER_LIST reçue: {added} entrées traitées")

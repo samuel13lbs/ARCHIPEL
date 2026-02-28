@@ -9,7 +9,7 @@ Archipel est un nœud LAN autonome qui combine:
 - sessions chiffrées E2E sur TCP,
 - paquets binaires `ARCP` v1 sur discovery, handshake et tunnel sécurisé (`MAGIC|TYPE|NODE_ID|PAYLOAD_LEN|HMAC`),
 - transfert de fichiers chunké avec vérification d'intégrité (hash chunk + signature Ed25519 des `CHUNK_DATA`),
-- trust manuel (`trust/untrust`) pour autoriser les opérations sensibles.
+- trust TOFU automatique (premier contact) + trust manuel (`trust/untrust`).
 
 Le nœud expose une CLI interactive et une UI Web locale (offline, sans CDN).
 
@@ -62,6 +62,8 @@ $env:PYTHONPATH="src"
 python -m cli.archipel start --port 7777
 # mode offline strict (sans IA): python -m cli.archipel start --port 7777 --no-ai
 # mode automatique (trust + download + partage dossier): python -m cli.archipel start --port 7777 --auto
+# désactiver TOFU auto: python -m cli.archipel start --port 7777 --no-tofu
+# réplication passive auto (2 propriétaires par fichier): python -m cli.archipel start --port 7777 --auto --replication-factor 2
 ```
 
 ## Lancement Web UI (offline)
@@ -71,6 +73,7 @@ $env:PYTHONPATH="src"
 python -m web.server --node-port 7777 --web-port 8080
 # mode offline strict (sans IA): python -m web.server --node-port 7777 --web-port 8080 --no-ai
 # mode automatique: python -m web.server --node-port 7777 --web-port 8080 --auto
+# désactiver TOFU auto: python -m web.server --node-port 7777 --web-port 8080 --no-tofu
 ```
 
 Ouvrir ensuite `http://127.0.0.1:8080`.
@@ -99,7 +102,8 @@ Ouvrir ensuite `http://127.0.0.1:8080`.
 En mode `--auto`:
 - trust automatique des peers découverts,
 - téléchargement automatique des manifests reçus,
-- partage automatique des fichiers déposés dans `.archipel/node-<port>/auto-send/` (ou `--auto-send-dir`).
+- partage automatique des fichiers déposés dans `.archipel/node-<port>/auto-send/` (ou `--auto-send-dir`),
+- réplication passive configurable via `--replication-factor`.
 
 ## Guide démo (3 cas d'usage)
 
@@ -129,15 +133,13 @@ Voir `.env.example` pour les valeurs usuelles (ports, state dir).
 - Download multi-source implémenté (3 workers) avec rarest-first heuristique; optimisation réseau encore possible.
 - Keepalive actif implémenté sur sessions sécurisées; instrumentation avancée encore à faire.
 - Authentification pré-session des paquets de contrôle (HMAC statique locale) à durcir.
-- TOFU automatique non activé (validation via trust manuel uniquement).
 - L'IA Gemini dépend d'une connectivité externe + clé API valide.
 
 ## Pistes d'amélioration
 
 - Optimisations scheduler (pondération latence/bande passante, priorisation dynamique).
 - Métriques de session (RTT, taux retry, débit par pair).
-- Réputation des pairs + shared_files dans la peer table (alignement complet cahier).
-- Réplication passive configurable des chunks.
+- Pondération du scheduler par réputation dynamique des pairs.
 - Module IA optionnel (`--no-ai`) conforme cahier.
 
 ## Membres et contributions

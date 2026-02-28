@@ -1,5 +1,6 @@
 ﻿import concurrent.futures as cf
 import base64
+import hashlib
 import json
 import random
 import shlex
@@ -30,14 +31,18 @@ class ArchipelRuntime:
         logger: Callable[[str], None],
         ai_enabled: bool = True,
         ai_context_messages: int = 12,
+        tofu_auto: bool = True,
         auto_mode: bool = False,
         auto_send_dir: str = "",
+        replication_factor: int = 1,
     ) -> None:
         self.port = port
         self.hello_interval = hello_interval
         self.state_dir = state_dir
         self.log = logger
+        self.tofu_auto = tofu_auto
         self.auto_mode = auto_mode
+        self.replication_factor = max(1, int(replication_factor))
         self._chat_history: deque[dict] = deque(maxlen=200)
         self.ai_context_messages = max(1, ai_context_messages)
         self.ai = GeminiClient.from_env(enabled=ai_enabled, logger=self.log)
@@ -84,8 +89,13 @@ class ArchipelRuntime:
         )
         self.tcp.start()
         self.discovery.start()
+        if self.tofu_auto:
+            self.log("[TRUST] TOFU automatique actif")
+            threading.Thread(target=self._tofu_trust_loop, daemon=True).start()
         if self.auto_mode:
-            self.log(f"[AUTO] mode=on auto_send_dir={self.auto_send_dir}")
+            self.log(
+                f"[AUTO] mode=on auto_send_dir={self.auto_send_dir} replication_factor={self.replication_factor}"
+            )
             threading.Thread(target=self._auto_trust_loop, daemon=True).start()
             threading.Thread(target=self._auto_download_loop, daemon=True).start()
             threading.Thread(target=self._auto_send_loop, daemon=True).start()
@@ -119,6 +129,8 @@ class ArchipelRuntime:
     def auto_status_payload(self) -> dict:
         return {
             "enabled": self.auto_mode,
+            "tofu_auto": self.tofu_auto,
+            "replication_factor": self.replication_factor,
             "auto_send_dir": str(self.auto_send_dir),
             "auto_download_done": len(self._auto_download_done),
             "auto_download_pending": len(self._auto_download_next_try),
@@ -175,13 +187,55 @@ class ArchipelRuntime:
                 out.append(peer)
         return out
 
+    def _tofu_trust_loop(self) -> None:
+        while not self._bg_stop.is_set():
+            try:
+                for item in self.table.to_list():
+                    node_id = str(item.get("node_id", ""))
+                    ed25519_pub = str(item.get("ed25519_pub", ""))
+                    if not node_id or not ed25519_pub:
+                        continue
+                    status = self.trust.observe_peer_key(node_id, ed25519_pub, auto_trust=True)
+                    if status == "new_trusted":
+                        self.log(f"[TRUST/TOFU] Premier contact approuve: {node_id[:12]}...")
+                    elif status == "mismatch":
+                        self.log(f"[TRUST/TOFU] ALERTE fingerprint mismatch pour {node_id[:12]}... (pair de-trust)")
+            except Exception as exc:
+                self.log(f"[TRUST/TOFU] Erreur loop: {exc}")
+            self._bg_stop.wait(2)
+
+    def _should_auto_replicate(self, file_id: str) -> bool:
+        if self.replication_factor <= 1:
+            return True
+        candidates = {self.identity.node_id}
+        for p in self.table.to_list():
+            nid = str(p.get("node_id", ""))
+            if nid:
+                candidates.add(nid)
+        scored: list[tuple[int, str]] = []
+        for node_id in candidates:
+            h = hashlib.sha256(f"{file_id}:{node_id}".encode("utf-8")).digest()
+            scored.append((int.from_bytes(h, "big"), node_id))
+        scored.sort(key=lambda x: x[0])
+        keep = {node for _, node in scored[: min(self.replication_factor, len(scored))]}
+        return self.identity.node_id in keep
+
     def _auto_trust_loop(self) -> None:
         while not self._bg_stop.is_set():
             try:
                 for item in self.table.to_list():
                     node_id = str(item.get("node_id", ""))
+                    ed25519_pub = str(item.get("ed25519_pub", ""))
                     if not node_id or self.trust.is_trusted(node_id):
                         continue
+                    if ed25519_pub:
+                        status = self.trust.observe_peer_key(node_id, ed25519_pub, auto_trust=True)
+                        if status == "mismatch":
+                            self.log(f"[AUTO] Refus trust auto (fingerprint mismatch) {node_id[:12]}...")
+                            continue
+                        if status == "new_trusted":
+                            self.log(f"[AUTO] Trust automatique: {node_id[:12]}...")
+                            continue
                     self.trust.trust(node_id)
                     self.log(f"[AUTO] Trust automatique: {node_id[:12]}...")
             except Exception as exc:
@@ -195,6 +249,8 @@ class ArchipelRuntime:
                 for item in self.transfer.list_manifests():
                     file_id = str(item.get("file_id", ""))
                     if not file_id or file_id in self._auto_download_done:
+                        continue
+                    if not self._should_auto_replicate(file_id):
                         continue
 
                     retry_at = self._auto_download_next_try.get(file_id, 0.0)
@@ -302,6 +358,7 @@ class ArchipelRuntime:
             if peer is not None and all(peer.node_id != x.node_id for x in peers):
                 peers.append(peer)
 
+        peers.sort(key=lambda p: (-float(getattr(p, "reputation", 1.0)), p.node_id))
         return peers
 
     def _ensure_trusted_or_raise(self, peer: Peer, context: str) -> None:
@@ -365,6 +422,7 @@ class ArchipelRuntime:
             random.shuffle(candidates)
 
             for peer in candidates:
+                success_for_peer = False
                 for _ in range(2):
                     try:
                         resp = self.tcp.request_chunk(peer, file_id, index)
@@ -378,9 +436,13 @@ class ArchipelRuntime:
                         if sha256_bytes(raw) != expected_hash:
                             continue
                         self.transfer.store_chunk(file_id, index, raw, expected_hash)
+                        success_for_peer = True
+                        self.table.record_chunk_result(peer.node_id, True)
                         return True
                     except Exception:
                         continue
+                if not success_for_peer:
+                    self.table.record_chunk_result(peer.node_id, False)
             return False
 
         failures: list[int] = []

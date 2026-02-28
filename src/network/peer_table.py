@@ -1,7 +1,7 @@
-﻿import json
+import json
 import threading
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -13,6 +13,10 @@ class Peer:
     tcp_port: int
     last_seen: float
     ed25519_pub: str = ""
+    shared_files: list[str] = field(default_factory=list)
+    reputation: float = 1.0
+    success_chunks: int = 0
+    failed_chunks: int = 0
 
 
 class PeerTable:
@@ -41,8 +45,23 @@ class PeerTable:
                 tcp_port = int(item.get("tcp_port", 0))
                 last_seen = float(item.get("last_seen", now))
                 ed25519_pub = str(item.get("ed25519_pub", ""))
+                shared_raw = item.get("shared_files", [])
+                shared_files = [str(x) for x in shared_raw] if isinstance(shared_raw, list) else []
+                reputation = float(item.get("reputation", 1.0))
+                success_chunks = int(item.get("success_chunks", 0))
+                failed_chunks = int(item.get("failed_chunks", 0))
                 if node_id and ip and tcp_port > 0:
-                    self._peers[node_id] = Peer(node_id, ip, tcp_port, last_seen, ed25519_pub)
+                    self._peers[node_id] = Peer(
+                        node_id=node_id,
+                        ip=ip,
+                        tcp_port=tcp_port,
+                        last_seen=last_seen,
+                        ed25519_pub=ed25519_pub,
+                        shared_files=shared_files,
+                        reputation=max(0.0, min(1.0, reputation)),
+                        success_chunks=max(0, success_chunks),
+                        failed_chunks=max(0, failed_chunks),
+                    )
         except Exception:
             return
 
@@ -71,7 +90,39 @@ class PeerTable:
                 tcp_port=tcp_port,
                 last_seen=ts,
                 ed25519_pub=pub,
+                shared_files=list(existing.shared_files) if existing else [],
+                reputation=float(existing.reputation) if existing else 1.0,
+                success_chunks=int(existing.success_chunks) if existing else 0,
+                failed_chunks=int(existing.failed_chunks) if existing else 0,
             )
+            self._save_locked()
+
+    def note_shared_file(self, node_id: str, file_id: str) -> None:
+        file_id = str(file_id).strip()
+        if not file_id:
+            return
+        with self._lock:
+            peer = self._peers.get(node_id)
+            if peer is None:
+                return
+            if file_id in peer.shared_files:
+                return
+            peer.shared_files.append(file_id)
+            if len(peer.shared_files) > 200:
+                peer.shared_files = peer.shared_files[-200:]
+            self._save_locked()
+
+    def record_chunk_result(self, node_id: str, ok: bool) -> None:
+        with self._lock:
+            peer = self._peers.get(node_id)
+            if peer is None:
+                return
+            if ok:
+                peer.success_chunks += 1
+            else:
+                peer.failed_chunks += 1
+            total = peer.success_chunks + peer.failed_chunks
+            peer.reputation = (peer.success_chunks / total) if total > 0 else 1.0
             self._save_locked()
 
     def remove_stale(self) -> List[str]:
@@ -107,3 +158,4 @@ class PeerTable:
 
     def to_json(self) -> str:
         return json.dumps(self.to_list(), indent=2)
+
