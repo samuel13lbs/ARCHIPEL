@@ -295,7 +295,10 @@ def build_html() -> str:
     </div>
 
     <div style=\"margin-top:12px\">
-      <div class=\"label\">Logs temps réel</div>
+      <div class=\"row\">
+        <div class=\"label\" style=\"margin-bottom:0\">Logs temps réel</div>
+        <button id=\"toggleLogsBtn\" class=\"btn-dark\" onclick=\"toggleLogs()\">Cacher logs</button>
+      </div>
       <div id=\"logs\" class=\"logs\"></div>
     </div>
   </section>
@@ -397,6 +400,7 @@ def build_html() -> str:
 <script>
 let lastSeq = 0;
 let appState = null;
+let logsVisible = true;
 const pages = ['dashboard', 'messages', 'files', 'peers'];
 
 function getv(id) {
@@ -431,6 +435,19 @@ function setPage(page) {
   if (window.location.hash !== '#' + selected) {
     window.location.hash = selected;
   }
+}
+
+function setLogsVisibility(visible) {
+  logsVisible = !!visible;
+  const box = document.getElementById('logs');
+  const btn = document.getElementById('toggleLogsBtn');
+  if (!box || !btn) return;
+  box.style.display = logsVisible ? 'block' : 'none';
+  btn.textContent = logsVisible ? 'Cacher logs' : 'Afficher logs';
+}
+
+function toggleLogs() {
+  setLogsVisibility(!logsVisible);
 }
 
 function pageFromHash() {
@@ -590,6 +607,7 @@ setInterval(refreshState, 3000);
 setInterval(pollLogs, 1000);
 refreshAll();
 setPage(pageFromHash());
+setLogsVisibility(true);
 
 document.getElementById('cmd').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') sendCmd();
